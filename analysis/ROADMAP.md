@@ -33,21 +33,34 @@ The port is GPL v2 or later. Its author asks that reuse credits the project and 
 ## Added on our branch
 
 - `verify_dump.py` (above).
+- **Play-test reports** (`gow3_pc/src/runtime_report.c`, `tools/playtest_reports.py`): a crash, a
+  stop on a failed check, a freeze (no new frame for 20 s) or a moment marked with F8 writes a
+  folder in `analysis/reports`: the save and level packages last loaded (where in the game), the
+  call stack, every thread for a freeze or mark, the end of the log, a screenshot and, for a
+  crash, a minidump. How to use them: [PLAYTEST.md](PLAYTEST.md).
+- Uncharted 3 waits for GPU readbacks by default (`GOW3_ASYNC_READBACK=0`), the setting that held
+  in the pub fight; `analysis/uncharted-user/test-env-u3.txt` overrides it for one game.
 
 ## What is left, in order
 
-1. **Uncharted 3 stability**: readback modes 0 and 1 in longer sessions; the pub fight crash.
-2. **Play testing** with crash reports that show where a crash happened, then fixing what they
-   point at.
-3. **Phase 7, PC controls**:
-   1. *Key glyphs.* Where the game draws a button prompt (Uncharted 3's pub fight: "Press □ to
-      attack"), show the bound key or mouse button, and Xbox glyphs on an Xbox pad. Lead:
+The plan (16 Oct): finish the launcher and the PC controls first, then play all three games from
+start to finish, keeping count of the crashes through the reports, and debug and fix each one.
+
+1. **Phase 7, PC controls, and the launcher**:
+   1. *Key glyphs.* Where the game draws a button prompt (Uncharted 3's pub fight: "Press △ to
+      counter attack"), show the bound key or mouse button, and Xbox glyphs on an Xbox pad. Lead:
       upstream gow3_pc's controller-dependent button icons for God of War III (`9155cdc`,
       PR #192 `feat/controller-glyphs`), merged after this port branched.
    2. *Mapping in the game's Options, Controls* instead of the launcher tab and the in-game
       overlay, saved per game. The games' Controls page has no remapping, so this means extending
       that page (patching its menu code) or a page drawn in the game's own menu style.
    3. *The runtime's dialogs* (save slots, messages) follow the same bindings and the game's look.
+2. **Full playthroughs** of the three games with the reports ([PLAYTEST.md](PLAYTEST.md)); every
+   crash, freeze or mark folder is one item to debug and fix.
+3. **Uncharted 3 readbacks**: mode 0 (the new default) held 5 minutes at the counter-attack prompt
+   of the pub fight, where mode 2 failed twice on 16 Oct (a game call through a pointer read as -1
+   at big3 0xe599bb; a GPU recompiler check after SRT-walker reads of -1) and once on 15 Oct:
+   stale data read back. Mode 1 (protected, faster) is untested in Uncharted 3.
 4. **Newer upstream gow3_pc**: this port branched at `08b300a` (13 Oct) and is 70+ commits behind
    (AMD fixes, PR #106; controller glyphs, PR #192). `gow3_pc/` is a plain folder here, so the
    merge is a subtree merge.

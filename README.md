@@ -121,7 +121,8 @@ tools/package_windows.sh         # dist/Uncharted-windows(.zip); needs a Windows
 ```
 
 To run from the source tree: `Start-Uncharted.cmd` (launcher), or
-`python tools/probe_uncharted.py --boot --seconds 0 --game <game folder>`.
+`python tools/probe_uncharted.py --boot --seconds 0 --game <game folder>`. Play testing, with the
+crash, freeze and F8 mark reports in `analysis/reports`: [analysis/PLAYTEST.md](analysis/PLAYTEST.md).
 
 ### Releases
 
