@@ -426,6 +426,13 @@ def run_game(args, game, executable, guest_args, loadexec):
             env[runtime_key] = value
     # GPU readbacks are asynchronous in every game since 15 Oct (the runtime default; the old
     # launcher option is gone). GOW3_ASYNC_READBACK=0 in the environment restores the wait.
+    # Uncharted 3 waits by default: with asynchronous, unprotected readbacks the London pub fight
+    # failed three times (RX 9060 XT, 15-16 Oct; issues #1 and #2), twice at the first "counter
+    # attack" prompt: a game call through a pointer read as -1 (big3 0xe599bb), and a GPU
+    # recompiler check after SRT-walker reads of -1. Waiting held there for 4-5 minutes at the
+    # same 46-47 FPS.
+    if executable == "big3-ps4_Shipping.elf":
+        env.setdefault("GOW3_ASYNC_READBACK", "0")
     # Play-test reports (crash, freeze, F8 mark) in analysis/reports: tools/playtest_reports.py.
     version = " ".join(value for value in (sfo_value(game, "TITLE_ID"), sfo_value(game, "APP_VER")) if value)
     env.update(playtest_reports.environment(executable, guest_args, version))
@@ -473,15 +480,17 @@ def run_game(args, game, executable, guest_args, loadexec):
         env.setdefault("GOW3_READBACKS", "2")
         print("Readbacks: precise (analysis/uncharted-user/precise-readbacks)")
     # Test settings for the next start without code changes: KEY=VALUE lines (# comments) in
-    # analysis/uncharted-user/test-env.txt; they override everything set above.
-    test_env = user / "test-env.txt"
-    if test_env.exists():
+    # analysis/uncharted-user/test-env.txt, then test-env-u1.txt (-u2, -u3) for one game only;
+    # they override everything set above.
+    for test_env in (user / "test-env.txt", user / f"test-env-{game_key}.txt"):
+        if not test_env.exists():
+            continue
         for line in test_env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 env[key.strip()] = value.strip()
-                print(f"Test setting: {key.strip()}={value.strip()}")
+                print(f"Test setting ({test_env.name}): {key.strip()}={value.strip()}")
     # GPU-written constants back to guest memory for the SRT walker: write "auto"/"off" or
     # "<lo> <hi>" (hex range, one-off) into this file. GOW3_SYNC_GPU_CONSTANTS=1 starts it on.
     if diagnostics:
