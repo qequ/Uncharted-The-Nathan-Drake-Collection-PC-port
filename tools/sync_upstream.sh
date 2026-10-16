@@ -10,8 +10,9 @@
 # A merge conflict stops at step 2: resolve it in that worktree, commit, and run this again.
 # Play-test from the worktree (py tools/probe_uncharted.py ... started there), then
 #   bash tools/sync_upstream.sh --apply
-# fast-forwards this checkout's branch to "sync" (git refuses if uncommitted edits here touch the
-# same files), sets "main" to upstream's, and pushes both and upstream's tags to origin.
+# pushes "sync" as our branch to origin, with "main" set to upstream's and upstream's tags, and
+# fast-forwards this checkout to it (git refuses while uncommitted edits here touch the same
+# files: the script then says how to follow later).
 set -euo pipefail
 main_root=$(git -C "$(dirname -- "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
 cd -- "$main_root"
@@ -24,16 +25,24 @@ clean() { git -C "$1" diff --quiet --ignore-submodules=dirty HEAD --; }
 if [[ ${1:-} == --apply ]]; then
     clean "$sync_dir" || { echo "$sync_dir has uncommitted changes" >&2; exit 1; }
     git merge-base --is-ancestor upstream/main sync || { echo "sync lacks upstream/main: run without --apply first" >&2; exit 1; }
-    git merge --ff-only sync || { echo "$branch has commits sync lacks: run without --apply first" >&2; exit 1; }
+    git merge-base --is-ancestor "$branch" sync || { echo "$branch has commits sync lacks: run without --apply first" >&2; exit 1; }
     git branch -f main upstream/main
-    # The GitHub CLI supplies the credentials when it is installed and logged in.
+    # The GitHub CLI supplies the credentials when it is installed and logged in. The remote
+    # refuses the push if origin's branch has commits sync lacks.
     gh=$(command -v gh || echo "/c/Program Files/GitHub CLI/gh.exe")
     push=(git)
     if [[ -x $gh ]] && "$gh" auth status >/dev/null 2>&1; then
         push+=(-c credential.helper= -c "credential.helper=!\"$gh\" auth git-credential")
     fi
-    "${push[@]}" push origin "$branch" main $(git tag --merged upstream/main | sed 's#^#refs/tags/#')
-    echo "Pushed $branch ($(git rev-parse --short HEAD)) and main. Rebuild here: bash gow3_pc/build.sh"
+    "${push[@]}" push origin "sync:$branch" main $(git tag --merged upstream/main | sed 's#^#refs/tags/#')
+    echo "Pushed $branch ($(git rev-parse --short sync)) and main to origin."
+    # This checkout follows once its uncommitted edits allow (git refuses to overwrite them).
+    if git merge --ff-only sync; then
+        echo "Rebuild here: bash gow3_pc/build.sh"
+    else
+        echo "This checkout stays at $(git rev-parse --short HEAD): its edits touch files the merge changes." >&2
+        echo "When they allow: git stash && git merge --ff-only sync && git stash pop, then rebuild." >&2
+    fi
     exit 0
 fi
 
