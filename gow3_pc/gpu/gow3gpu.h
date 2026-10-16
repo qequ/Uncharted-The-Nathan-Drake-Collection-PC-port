@@ -46,6 +46,31 @@ uint64_t gow3gpu_flip_count(void);
 void gow3gpu_notice(const char *text);
 /* Called on the failing thread before a failed GPU library check ends the process (exit 23). */
 void gow3gpu_set_stop_hook(void (*hook)(const char *why));
+/* The button icons in the games' text (gpu/shim/gow3_glyphs.cpp) show what the player plays
+ * with: src/runtime_pad.c sends the device last used and what presses each PS4 button whenever
+ * either changes. A PlayStation pad keeps the games' own icons. */
+enum { GOW3_GLYPHS_PLAYSTATION, GOW3_GLYPHS_KEYBOARD, GOW3_GLYPHS_XBOX, GOW3_GLYPHS_OTHER_PAD };
+enum {
+    GOW3_GLYPH_CROSS, GOW3_GLYPH_CIRCLE, GOW3_GLYPH_SQUARE, GOW3_GLYPH_TRIANGLE,
+    GOW3_GLYPH_L1, GOW3_GLYPH_R1, GOW3_GLYPH_L2, GOW3_GLYPH_R2, GOW3_GLYPH_L3, GOW3_GLYPH_R3,
+    GOW3_GLYPH_OPTIONS, GOW3_GLYPH_TOUCHPAD,
+    GOW3_GLYPH_UP, GOW3_GLYPH_DOWN, GOW3_GLYPH_LEFT, GOW3_GLYPH_RIGHT,
+    GOW3_GLYPH_LS_UP, GOW3_GLYPH_LS_DOWN, GOW3_GLYPH_LS_LEFT, GOW3_GLYPH_LS_RIGHT,
+    GOW3_GLYPH_RS_UP, GOW3_GLYPH_RS_DOWN, GOW3_GLYPH_RS_LEFT, GOW3_GLYPH_RS_RIGHT,
+    GOW3_GLYPH_COUNT
+};
+/* Gamepad sources that are not buttons (pad[] below). */
+enum { GOW3_GLYPH_PAD_LEFT_TRIGGER = 100, GOW3_GLYPH_PAD_RIGHT_TRIGGER };
+typedef struct {
+    int32_t style;                   /* GOW3_GLYPHS_* */
+    int32_t key[GOW3_GLYPH_COUNT];   /* the first key that presses it (SDL scancode), 0: none */
+    int32_t mouse[GOW3_GLYPH_COUNT]; /* the first mouse source: 1 left, 2 middle, 3 right, 4 X1,
+                                        5 X2, 6 wheel up, 7 wheel down; 0: none */
+    int32_t pad[GOW3_GLYPH_COUNT];   /* the gamepad button (SDL_GamepadButton or a trigger
+                                        above), -1: none */
+    char face[4];                    /* the pad's letters at south, east, west, north */
+} Gow3GlyphState;
+void gow3gpu_glyphs_set(const Gow3GlyphState *state);
 #ifdef __cplusplus
 }
 #endif

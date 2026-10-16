@@ -270,17 +270,19 @@ static void key_axis(uint8_t *axis, bool negative, bool positive) {
 }
 /* The mouse: its buttons through mouse_map, its movement as the right stick. The stick follows
  * the mouse's speed (pixels per ms, smoothed over ~25 ms), starts past the games' stick dead
- * zone so slow movements turn the camera too, and lets go when the mouse rests. */
-static void sample_mouse(PadData *d) {
+ * zone so slow movements turn the camera too, and lets go when the mouse rests. Returns 1 when
+ * the player used the mouse (a button, or a real movement). */
+static int sample_mouse(PadData *d) {
     static int enabled=-1; static float sensitivity=1.0f, invert=1.0f;
     if (enabled<0) {
         const char *env=getenv("GOW3_MOUSE"); enabled=!(env && env[0]=='0');
         const char *sens=getenv("GOW3_MOUSE_SENS"); if (sens && atof(sens)>0) sensitivity=(float)atof(sens);
         const char *inv=getenv("GOW3_MOUSE_INVERT"); if (inv && inv[0]=='1') invert=-1.0f;
     }
-    if (!enabled) return;
+    if (!enabled) return 0;
     float dx=0, dy=0; unsigned held=0;
     const int captured=gow3gpu_mouse_take(&dx,&dy,&held);
+    const int used=held || (captured && fabsf(dx)+fabsf(dy)>2.0f);
     for (size_t i=0;i<mouse_map.count;++i)
         if (held & (1u<<(mouse_map.entries[i].source-1))) d->buttons|=mouse_map.entries[i].ps;
     static float vx, vy; static uint64_t last, last_motion;
@@ -293,14 +295,73 @@ static void sample_mouse(PadData *d) {
     const float blend=dt/(dt+25.0f);
     vx+=(dx/dt-vx)*blend;
     vy+=(dy/dt-vy)*blend;
-    if (!captured || now-last_motion>60000) { vx=vy=0; return; }
+    if (!captured || now-last_motion>60000) { vx=vy=0; return used; }
     float sx=vx*sensitivity*0.12f, sy=vy*sensitivity*0.12f*invert;
     const float magnitude=sqrtf(sx*sx+sy*sy);
-    if (magnitude<0.002f) return;
+    if (magnitude<0.002f) return used;
     const float out=magnitude+0.15f>1.0f ? 1.0f : magnitude+0.15f;
     sx*=out/magnitude; sy*=out/magnitude;
     d->right_x=(uint8_t)(sx<-1.0f ? 0 : sx>1.0f ? 255 : (int)(128.0f+sx*127.0f));
     d->right_y=(uint8_t)(sy<-1.0f ? 0 : sy>1.0f ? 255 : (int)(128.0f+sy*127.0f));
+    return used;
+}
+
+/* Button icons in the games' text (gow3gpu_glyphs_set): the device the player used last and what
+ * presses each PS4 button. GOW3_GLYPHS: auto (default: the keyboard and mouse or the gamepad,
+ * whichever was used last), keyboard, xbox, or playstation (the games' own icons always). */
+static int glyph_style_of(SDL_Gamepad *g) {
+    switch (SDL_GetGamepadType(g)) {
+    case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: return GOW3_GLYPHS_PLAYSTATION;
+    case SDL_GAMEPAD_TYPE_STANDARD: case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: return GOW3_GLYPHS_XBOX;
+    default: return GOW3_GLYPHS_OTHER_PAD; /* Nintendo and others: their own letters */
+    }
+}
+static char face_letter(SDL_Gamepad *g, SDL_GamepadButton button) {
+    switch (SDL_GetGamepadButtonLabel(g,button)) {
+    case SDL_GAMEPAD_BUTTON_LABEL_A: return 'A';
+    case SDL_GAMEPAD_BUTTON_LABEL_B: return 'B';
+    case SDL_GAMEPAD_BUTTON_LABEL_X: return 'X';
+    case SDL_GAMEPAD_BUTTON_LABEL_Y: return 'Y';
+    default: return 0;
+    }
+}
+static void update_glyphs(SDL_Gamepad *g, int pad_used, int keys_used) {
+    static int mode=-1, last_device=-1; /* last_device: 0 keyboard and mouse, 1 gamepad */
+    if (mode<0) {
+        const char *env=getenv("GOW3_GLYPHS");
+        mode=!env || !*env || !SDL_strcasecmp(env,"auto") ? 0 : !SDL_strcasecmp(env,"keyboard") ? 1
+            : !SDL_strcasecmp(env,"xbox") ? 2 : 3;
+    }
+    if (pad_used) last_device=1;
+    else if (keys_used) last_device=0;
+    else if (last_device<0) last_device=g!=NULL;
+    Gow3GlyphState s;
+    memset(&s,0,sizeof(s));
+    s.style=mode==1 ? GOW3_GLYPHS_KEYBOARD : mode==2 ? GOW3_GLYPHS_XBOX : mode==3 ? GOW3_GLYPHS_PLAYSTATION
+        : last_device==1 && g ? glyph_style_of(g) : GOW3_GLYPHS_KEYBOARD;
+    /* The PS4 button of each GOW3_GLYPH_* up to the d-pad; the touchpad is either side's click. */
+    static const uint32_t ps[]={BTN_CROSS,BTN_CIRCLE,BTN_SQUARE,BTN_TRIANGLE,BTN_L1,BTN_R1,BTN_L2,BTN_R2,
+        BTN_L3,BTN_R3,BTN_OPTIONS,CLICK_LEFT|CLICK_RIGHT|BTN_TOUCHPAD,BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT};
+    for (int i=0;i<GOW3_GLYPH_COUNT;++i) s.pad[i]=-1;
+    for (int i=0;i<(int)(sizeof(ps)/sizeof(*ps));++i) {
+        for (size_t j=0;j<key_map.count && !s.key[i];++j) if (key_map.entries[j].ps & ps[i]) s.key[i]=key_map.entries[j].source;
+        for (size_t j=0;j<mouse_map.count && !s.mouse[i];++j) if (mouse_map.entries[j].ps & ps[i]) s.mouse[i]=mouse_map.entries[j].source;
+        for (size_t j=0;j<pad_map.count && s.pad[i]<0;++j) if (pad_map.entries[j].ps & ps[i]) s.pad[i]=pad_map.entries[j].source;
+    }
+    s.pad[GOW3_GLYPH_L2]=GOW3_GLYPH_PAD_LEFT_TRIGGER; /* the triggers press L2 and R2 */
+    s.pad[GOW3_GLYPH_R2]=GOW3_GLYPH_PAD_RIGHT_TRIGGER;
+    for (size_t j=0;j<stick_keys.count;++j) {
+        int32_t *slot=&s.key[GOW3_GLYPH_LS_UP+stick_keys.entries[j].direction];
+        if (!*slot) *slot=stick_keys.entries[j].source;
+    }
+    if (g) {
+        s.face[0]=face_letter(g,SDL_GAMEPAD_BUTTON_SOUTH); s.face[1]=face_letter(g,SDL_GAMEPAD_BUTTON_EAST);
+        s.face[2]=face_letter(g,SDL_GAMEPAD_BUTTON_WEST); s.face[3]=face_letter(g,SDL_GAMEPAD_BUTTON_NORTH);
+    }
+    static Gow3GlyphState sent; static int have_sent;
+    if (have_sent && !memcmp(&s,&sent,sizeof(s))) return;
+    sent=s; have_sent=1;
+    gow3gpu_glyphs_set(&s);
 }
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
@@ -312,6 +373,7 @@ static void sample_host(PadData *d) {
     if (gow3gpu_overlay_captures_input()) return; /* settings menu open: neutral input */
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     load_button_maps();
+    int pad_used=0, keys_used=0;
     if (g) {
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
@@ -334,6 +396,9 @@ static void sample_host(PadData *d) {
                 }
             }
         }
+        /* A deliberate use (a button, a stick past half way, a trigger, a finger): the icons follow. */
+        pad_used=d->buttons || d->touch_count || abs(d->left_x-128)>64 || abs(d->left_y-128)>64 ||
+                 abs(d->right_x-128)>64 || abs(d->right_y-128)>64;
     }
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. GOW3_KEYBOARD=0 turns it off (typing in
@@ -341,17 +406,18 @@ static void sample_host(PadData *d) {
     static int keyboard=-1;
     if (keyboard<0) { const char *env=getenv("GOW3_KEYBOARD"); keyboard=!(env && env[0]=='0'); }
     if (k && keyboard) {
-        for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) d->buttons|=key_map.entries[i].ps;
+        for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) { d->buttons|=key_map.entries[i].ps; keys_used=1; }
         bool held[STICK_KEYS]={0};
-        for (size_t i=0;i<stick_keys.count;++i) if (k[stick_keys.entries[i].source]) held[stick_keys.entries[i].direction]=true;
+        for (size_t i=0;i<stick_keys.count;++i) if (k[stick_keys.entries[i].source]) { held[stick_keys.entries[i].direction]=true; keys_used=1; }
         key_axis(&d->left_x,held[LS_LEFT],held[LS_RIGHT]);
         key_axis(&d->left_y,held[LS_UP],held[LS_DOWN]);
         key_axis(&d->right_x,held[RS_LEFT],held[RS_RIGHT]);
         key_axis(&d->right_y,held[RS_UP],held[RS_DOWN]);
     }
-    sample_mouse(d);
+    if (sample_mouse(d)) keys_used=1;
     if (d->buttons & BTN_L2) d->l2=255;
     if (d->buttons & BTN_R2) d->r2=255;
+    update_glyphs(g,pad_used,keys_used);
 }
 
 /* GOW3_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

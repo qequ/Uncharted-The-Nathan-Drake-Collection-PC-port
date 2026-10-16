@@ -4,6 +4,7 @@
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
+#include "gow3_glyphs.h"
 #include "gow3_toggles.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -1248,6 +1249,41 @@ void TextureCache::RefreshImage(Image& image) {
         return;
     }
 
+    // gow3: the games' button icon font shows the player's keys or gamepad (gow3_glyphs.h): the
+    // texture is recognised by its content at each upload, and the icons drawn for the player
+    // replace it (InvalidateGlyphs uploads new ones). The game's memory is never written.
+    if (Gow3Glyphs::Candidate(image.info.size.width, image.info.size.height,
+                              image.info.pixel_format == vk::Format::eR8G8B8A8Unorm, num_mips,
+                              image.info.tile_mode == AmdGpu::TileMode::Thin1DThin)) {
+        image.gow3_glyph = Gow3Glyphs::Identify(std::bit_cast<const u8*>(image.info.guest_address),
+                                                image.info.guest_size);
+        if (image.gow3_glyph) {
+            if (const auto pixels = Gow3Glyphs::Pixels(Gow3Glyphs::Role(image.gow3_glyph))) {
+                scheduler.EndRendering();
+                auto& stream = buffer_cache.GetStreamBuffer();
+                if (const auto [data, offset] = stream.Map(pixels->size(), 4); data) {
+                    std::memcpy(data, pixels->data(), pixels->size());
+                    stream.Commit();
+                    const vk::BufferImageCopy copy{
+                        .bufferOffset = offset,
+                        .bufferRowLength = 0,
+                        .bufferImageHeight = 0,
+                        .imageSubresource{
+                            .aspectMask = vk::ImageAspectFlagBits::eColor,
+                            .mipLevel = 0,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1,
+                        },
+                        .imageOffset = {0, 0, 0},
+                        .imageExtent = {image.info.size.width, image.info.size.height, 1},
+                    };
+                    runtime.UploadImage(&image, &stream, std::span{&copy, 1});
+                    return;
+                }
+            }
+        }
+    }
+
     scheduler.EndRendering();
 
     const auto [in_buffer, in_offset] =
@@ -1608,8 +1644,33 @@ void TextureCache::RunGarbageCollector() {
         ++gc_tick;
     };
 
+    // gow3: new button icons (the player switched between keyboard and gamepad).
+    if (const u32 generation = Gow3Glyphs::Generation(); generation != glyph_generation) {
+        glyph_generation = generation;
+        InvalidateGlyphs();
+    }
     GarbageCollectImages();
     GarbageCollectSamplers();
+}
+
+void TextureCache::InvalidateGlyphs() {
+    std::scoped_lock lock{mutex};
+    for (u32 index = 0; index < slot_images.capacity(); ++index) {
+        ImageId image_id{};
+        image_id.index = index;
+        if (!slot_images.is_allocated(image_id)) {
+            continue;
+        }
+        Image& image = slot_images[image_id];
+        if (!image.gow3_glyph || False(image.flags & ImageFlagBits::Registered)) {
+            continue;
+        }
+        InvalidateAlias(image);
+        image.flags |= ImageFlagBits::CpuDirty;
+        if (image.IsTracked()) {
+            UntrackImage(image_id);
+        }
+    }
 }
 
 void TextureCache::TouchImage(const Image& image) {

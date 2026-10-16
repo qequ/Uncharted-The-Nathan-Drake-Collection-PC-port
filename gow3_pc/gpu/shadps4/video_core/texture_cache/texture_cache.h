@@ -121,6 +121,10 @@ public:
     /// next use (as if the CPU had written all of them). Returns the number of images.
     size_t DebugInvalidateAll();
 
+    /// gow3: the images of the games' button icon font upload again on their next use (new
+    /// icons from gow3_glyphs.h).
+    void InvalidateGlyphs();
+
     /// Marks an image as dirty if it exists at the provided address.
     void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
 
@@ -482,6 +486,7 @@ private:
     u64 pressure_gc_samplers = 0;
     u64 critical_gc_samplers = 0;
     u64 gc_tick = 0;
+    u32 glyph_generation = 0; ///< gow3: the button icons last uploaded (gow3_glyphs.h)
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
