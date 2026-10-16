@@ -36,6 +36,9 @@ void SetBackgroundLoading(u32 done, u32 total);
 /// Whether anything is drawn this frame (menu open or FPS counter on).
 bool Visible();
 
+/// A one-line notice at the top of the screen for `seconds` (a play-test mark was saved).
+void Notify(const std::string& text, int seconds);
+
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 

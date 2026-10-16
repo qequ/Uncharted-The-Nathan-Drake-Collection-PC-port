@@ -80,6 +80,19 @@ std::vector<Gow3Png::Image> choice_pictures;
 std::vector<ImTextureData*> choice_textures, choice_retired;
 std::atomic<bool> choice_retiring{false};
 float base_scale = 1.0f;
+// A short notice at the top of the screen (a play-test mark was saved), guarded by imgui_mutex;
+// shown until notice_until (steady clock, ms).
+std::string notice_text;
+std::atomic<long long> notice_until{0};
+
+long long NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+bool NoticeActive() {
+    return notice_until.load(std::memory_order_relaxed) > NowMs();
+}
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
@@ -638,6 +651,20 @@ void BackgroundLoading() {
     ImGui::End();
 }
 
+void NoticeBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + 24.0f * base_scale),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.7f);
+    ImGui::Begin("##notice", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(notice_text.c_str());
+    ImGui::End();
+}
+
 } // namespace
 
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
@@ -926,7 +953,13 @@ void SetLoading(bool active, u32 done, u32 total) {
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
-                           choice_retiring || s.show_fps);
+                           choice_retiring || s.show_fps || NoticeActive());
+}
+
+void Notify(const std::string& text, int seconds) {
+    std::scoped_lock lock{imgui_mutex};
+    notice_text = text;
+    notice_until = NowMs() + seconds * 1000LL;
 }
 
 bool CapturesInput() {
@@ -997,6 +1030,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (background_total && !loading && !menu_open) {
         BackgroundLoading();
     }
+    if (NoticeActive()) {
+        NoticeBox();
+    }
     if (text_entry_active) {
         TextEntryBox();
     }
@@ -1026,3 +1062,8 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
 }
 
 } // namespace Gow3Overlay
+
+// gow3: the C side (src/runtime_report.c) confirms a play-test mark on screen.
+extern "C" void gow3gpu_notice(const char* text) {
+    Gow3Overlay::Notify(text ? text : "", 4);
+}

@@ -40,6 +40,12 @@ int gow3gpu_overlay_captures_input(void);
 int gow3gpu_mouse_take(float *dx, float *dy, unsigned *buttons);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned gow3gpu_symbol_count(void);
+/* Flips the game has submitted so far (the freeze watchdog of src/runtime_report.c). */
+uint64_t gow3gpu_flip_count(void);
+/* A one-line notice at the top of the game window for a few seconds (no window: nothing). */
+void gow3gpu_notice(const char *text);
+/* Called on the failing thread before a failed GPU library check ends the process (exit 23). */
+void gow3gpu_set_stop_hook(void (*hook)(const char *why));
 #ifdef __cplusplus
 }
 #endif

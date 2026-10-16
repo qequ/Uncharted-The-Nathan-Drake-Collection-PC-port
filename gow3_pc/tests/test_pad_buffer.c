@@ -1,6 +1,8 @@
 #include "../src/runtime_pad.c"
 #include <assert.h>
 int gow3gpu_overlay_captures_input(void) { return 0; }
+void runtime_report_mark(void) {}
+void runtime_report_test(void) {}
 uintptr_t runtime_lookup(const RuntimeExport *table,size_t count,const char *name) {
     (void)table; (void)count; (void)name; return 0;
 }

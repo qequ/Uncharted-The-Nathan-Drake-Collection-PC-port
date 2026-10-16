@@ -46,6 +46,7 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+    unsigned long win_tid; /* Windows thread id, for play-test reports */
 #ifdef _WIN32
     gow3_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
 #else
@@ -104,6 +105,9 @@ static void attach(GuestThread *t) {
     t->tls_block=block; t->tcb=tcb;
     set_gs(tcb);
     current=t;
+#ifdef _WIN32
+    t->win_tid=GetCurrentThreadId();
+#endif
 }
 static GuestThread *new_thread(void) {
     GuestThread *t=calloc(1,sizeof(*t));
@@ -398,5 +402,20 @@ void runtime_thread_report(void) {
     pthread_mutex_lock(&lock);
     printf("Runtime: guest threads created=%zu, exited=%zu, joined=%zu\n",created,exited,joined_count);
     pthread_mutex_unlock(&lock);
+}
+const char *runtime_thread_current_name(void) { return current ? current->name : NULL; }
+/* No waiting: a thread that hangs while holding the lock must not stop a freeze report. */
+int runtime_thread_names(unsigned long *ids, char (*names)[32], int max) {
+    if (pthread_mutex_trylock(&lock)) return -1;
+    int count=0;
+    for (GuestThread *t=threads; t && count<max; t=t->next) {
+        if (t->finished || !t->win_tid) continue;
+        ids[count]=t->win_tid;
+        memcpy(names[count],t->name,sizeof(t->name));
+        names[count][sizeof(t->name)-1]=0;
+        ++count;
+    }
+    pthread_mutex_unlock(&lock);
+    return count;
 }
 

@@ -107,6 +107,9 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
                         "Native libc initialization is incomplete; game entry has not run.");
     fflush(NULL);
+    char why[200];
+    snprintf(why,sizeof(why),"The game called %s, a PS4 function the runtime does not have.",runtime_import_name(names[id]));
+    runtime_report_stop(why);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
 #ifndef _WIN32
@@ -132,8 +135,14 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     snprintf(out,size,"%p",(void *)address);
 }
 static int fatal_reported;
+static DWORD fatal_thread;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
-    if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
+    if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) {
+        /* A fault while this thread writes the report ends the process at once. */
+        if (GetCurrentThreadId()==__atomic_load_n(&fatal_thread,__ATOMIC_ACQUIRE)) TerminateProcess(GetCurrentProcess(),3);
+        Sleep(INFINITE);
+    }
+    __atomic_store_n(&fatal_thread,GetCurrentThreadId(),__ATOMIC_RELEASE);
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     const CONTEXT *c=info->ContextRecord;
     char where[MAX_PATH+64];
@@ -158,6 +167,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         rbp=frame[0];
     }
     fflush(NULL);
+    runtime_report_crash(info,NULL); /* analysis/reports: what the game was doing, and a minidump */
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -768,6 +778,7 @@ int main(int argc, char **argv) {
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
     SetUnhandledExceptionFilter(unhandled_fault);
+    runtime_report_configure();
     if (getenv("GOW3_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
         strict.RaiseExceptionOnInvalidHandleReference=1;
@@ -891,6 +902,16 @@ int main(int argc, char **argv) {
     printf("Guest image base: %p (%s)\n",image,low_image ? "below 2 GiB" : "default range");
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    /* Reports name guest code by its module: the linked modules first (link_modules.py's default
+     * order), then the executable. */
+    for (uint64_t m=0;m<module_count;++m) {
+        char module_name[32];
+        if (m<2) snprintf(module_name,sizeof(module_name),"%s",m==0 ? "libc.prx" : "libSceFios2.prx");
+        else snprintf(module_name,sizeof(module_name),"module%" PRIu64 ".prx",m);
+        runtime_report_module(module_name,image+modules[m].base,modules[m].size);
+    }
+    const char *report_exe=getenv("GOW3_REPORT_EXE");
+    runtime_report_module(report_exe && *report_exe ? report_exe : "game",image,size);
     if (!cpu_only) {
         char title[128]="Uncharted: The Nathan Drake Collection", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
@@ -996,6 +1017,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     start_exec_watch();
 #endif
+    runtime_report_start(); /* freeze watchdog and the mark key */
     entered_game=1;
     struct { uint64_t argc; const char *argv[17]; } params = {(uint64_t)guest_argc, {NULL}};
     for (int i=0;i<guest_argc;++i) params.argv[i]=guest_argv[i];

@@ -168,6 +168,8 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     pthread_mutex_unlock(&lock);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
            exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "");
+    Param p;
+    if (exists && (mode & MODE_RDONLY) && !read_param(meta,&p)) runtime_report_save("read",p.subtitle);
     return 0;
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
@@ -208,6 +210,7 @@ static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const 
     }
     write_param(slots[slot].meta,&p);
     pthread_mutex_unlock(&lock);
+    runtime_report_save("written",p.subtitle);
     return 0;
 bad:
     pthread_mutex_unlock(&lock);

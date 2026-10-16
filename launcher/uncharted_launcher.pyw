@@ -31,6 +31,7 @@ ASSETS = ROOT / "launcher" / "assets"
 DEFAULT_GAME_DIR = ROOT / "game" / "CUSA02344" / "uroot"
 STARTER_EXE = ROOT / "Uncharted Launcher.exe"  # the packaged build's starter (tools/package_windows.py)
 USER_DIR = ROOT / "analysis" / "uncharted-user"
+REPORTS_DIR = ROOT / "analysis" / "reports"  # crash, freeze and F8 mark reports (tools/playtest_reports.py)
 INI_FILE = USER_DIR / "probe.ini"
 RUN_SCRIPT = ROOT / "tools" / "probe_uncharted.py"
 CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
@@ -121,8 +122,9 @@ TK_TO_SDL = {
 }
 TK_TO_SDL.update({f"F{n}": f"F{n}" for n in range(1, 13)})
 TK_TO_SDL.update({f"KP_{n}": f"Keypad {n}" for n in range(10)})
-# Keys the runtime keeps for itself: Insert opens the in-game menu, F9 records the pad.
-RESERVED_KEYS = {"Insert", "F9", "comma"}
+# Keys the runtime keeps for itself: Insert opens the in-game menu, F8 marks a moment for a
+# play-test report (analysis/reports), F9 records the pad.
+RESERVED_KEYS = {"Insert", "F8", "F9", "comma"}
 
 
 def merged_controls(controls):
@@ -1107,7 +1109,8 @@ class Launcher:
                  "installs one.", check_updates)
         buttons = tk.Frame(page, bg=BG)
         buttons.pack(side="top", fill="x", pady=(self.px(6), self.px(10)))
-        for label, action in (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
+        for label, action in (("Open log folder", self.open_logs), ("Crash reports", self.open_reports),
+                              ("Open save folder", self.open_saves),
                               ("Desktop shortcut", self.desktop_shortcut), ("Clear shader cache", self.clear_cache),
                               ("Reset all settings", self.reset),
                               ("Check for updates", lambda: self.check_updates(manual=True))):
@@ -1363,6 +1366,7 @@ class Launcher:
         self.started_at = time.time()
         self.last_output = time.time()
         self.game_started = False
+        self.crash_report = None
         # The start script's output (preparation, patches, the runtime's log path): kept for
         # "the game does not start" reports.
         try:
@@ -1398,6 +1402,8 @@ class Launcher:
             except queue.Empty:
                 break
             self.last_output = time.time()
+            if line.startswith("Crash report folder:"):  # tools/playtest_reports.py
+                self.crash_report = Path(line.split(":", 1)[1].strip())
             if line.startswith("Collection: switching to"):
                 target = line.split("switching to", 1)[1].strip().split()[0]
                 name = next((g["name"] for g in GAMES if g["exe"] == target), target)
@@ -1434,12 +1440,46 @@ class Launcher:
                 return "\n".join(context)[-600:]
         return None
 
+    def latest_crash_report(self):
+        """The crash report of this run (tools/playtest_reports.py names it in the output; the
+        newest crash or stop folder written since the start covers a line not read yet)."""
+        report = getattr(self, "crash_report", None)
+        if report and report.is_dir():
+            return report
+        try:
+            folders = [f for f in REPORTS_DIR.iterdir() if f.is_dir() and f.name.endswith((" crash", " stop"))
+                       and f.stat().st_mtime >= getattr(self, "started_at", 0)]
+        except OSError:
+            return None
+        return max(folders, key=lambda f: f.stat().st_mtime) if folders else None
+
+    def crash_summary(self, folder):
+        """The report's title, what happened and the last save (where in the game)."""
+        try:
+            lines = (folder / "report.txt").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return folder.name
+        summary = lines[:1]
+        summary += [line.strip() for line in lines if line.startswith(("Save:", "When:"))]
+        if "What happened" in lines:
+            start = lines.index("What happened") + 1
+            summary += [line.strip() for line in lines[start:start + 4] if line.strip()]
+        summary += [line.strip() for line in lines if line.startswith("Exit code:")]
+        return "\n".join(summary)[:900]
+
     def finished(self, code):
         self.process = None
         self.draw_play()
         if code in (0, None) or getattr(self, "stopping", False):
             self.stopping = False
             self.set_status("Game closed.", "Ready to play again.")
+            return
+        report = self.latest_crash_report()
+        if report:
+            self.set_status("The game crashed.", f"Report: analysis\\reports\\{report.name}")
+            if messagebox.askyesno(APP_TITLE, f"{self.crash_summary(report)}\n\nThe report is in "
+                                              f"analysis\\reports\\{report.name}. Open it?"):
+                os.startfile(report)
             return
         reason = self.crash_reason()
         self.set_status("The game stopped unexpectedly.", f"Exit code {code}. See the log for details.")
@@ -1461,6 +1501,10 @@ class Launcher:
         log = self.latest_log()
         folder = log.parent if log else ROOT / "analysis"
         os.startfile(folder)
+
+    def open_reports(self):
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(REPORTS_DIR)
 
     def open_saves(self):
         folder = USER_DIR / "savedata"

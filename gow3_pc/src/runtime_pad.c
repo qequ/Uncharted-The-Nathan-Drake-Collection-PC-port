@@ -462,11 +462,29 @@ static void replay_sample(PadData *d) {
     d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
     d->l2=s->l2; d->r2=s->r2;
 }
+/* GOW3_MARK_KEY (an SDL key name, default F8; "off" turns it off): the player marks a moment
+ * that looks wrong, and runtime_report.c writes a report of what the game was doing. */
+static void mark_key(void) {
+    static int code=-2, was_down;
+    if (code==-2) {
+        const char *name=getenv("GOW3_MARK_KEY");
+        if (!name || !*name) name="F8";
+        code=!strcmp(name,"off") || !strcmp(name,"0") ? -1 : (int)SDL_GetScancodeFromName(name);
+        if (code<=(int)SDL_SCANCODE_UNKNOWN) code=-1;
+    }
+    if (code<0 || !sdl_ready) return;
+    const bool *k=SDL_GetKeyboardState(NULL);
+    const int down=k && k[code];
+    if (down && !was_down) runtime_report_mark();
+    was_down=down;
+}
 /* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
  * name) stay hidden until released: the game would take them as a new press. */
 static int hold_after_capture;
 static void sample(PadData *d) {
     sample_host(d);
+    mark_key();
+    runtime_report_test();
     if (gow3gpu_overlay_captures_input()) { hold_after_capture=1; click.side=-1; return; }
     record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();

@@ -195,6 +195,10 @@ static ABI __attribute__((noreturn)) void hard_exit(int status) {
 }
 static ABI __attribute__((noreturn)) void raise_exception(uint32_t code,uint64_t argument) {
     fprintf(stderr,"STOP: guest raised debug exception code=0x%x argument=0x%llx\n",code,(unsigned long long)argument);
+    char why[160];
+    snprintf(why,sizeof(why),"The game raised a debug exception (code 0x%x, argument 0x%llx): one of its own checks "
+             "failed; its message is in log-tail.txt.",code,(unsigned long long)argument);
+    runtime_report_stop(why);
     runtime_report();
     exit(23);
 }
@@ -222,6 +226,7 @@ static ABI int32_t is_signal_return(uint64_t pc) { (void)pc; return 0; }
 static ABI void pthread_cxa_finalize(void *dso) { (void)dso; }
 static ABI __attribute__((noreturn)) void unwind_resume(void) {
     fputs("STOP: guest C++ exception unwinding (sigreturn/__Ux86_64_setcontext) is not supported\n",stderr);
+    runtime_report_stop("The game unwound a C++ exception, which the runtime does not support.");
     runtime_report();
     exit(23);
 }

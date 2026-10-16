@@ -37,6 +37,22 @@ void runtime_set_procparam(void *param);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
+/* The calling thread's guest name, NULL for threads the guest did not create or attach. */
+const char *runtime_thread_current_name(void);
+/* Windows thread ids and names of the running guest threads (reports); -1 while the list is busy. */
+int runtime_thread_names(unsigned long *ids, char (*names)[32], int max);
+/* Play-test reports (runtime_report.c): crash, freeze and mark reports in GOW3_REPORT_DIR. */
+void runtime_report_configure(void);
+void runtime_report_module(const char *name, const void *base, uint64_t size);
+void runtime_report_start(void);
+void runtime_report_crash(void *exception_pointers, const char *note);
+/* A report of the calling thread before the port itself ends the game (a failed check). */
+void runtime_report_stop(const char *why);
+void runtime_report_mark(void);
+void runtime_report_save(const char *how, const char *subtitle);
+void runtime_report_level(const char *name);
+void runtime_report_test(void);
+void runtime_event(const char *format, ...) __attribute__((format(printf,1,2)));
 void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
 void runtime_thread_attach_main(void);
 int32_t *runtime_errno(void);

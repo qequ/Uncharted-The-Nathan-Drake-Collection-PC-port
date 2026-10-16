@@ -158,6 +158,7 @@ static ABI void guard_abort(uint64_t *guard) {
 }
 static ABI __attribute__((noreturn)) void stack_fail(void) {
     fputs("STOP: guest stack protector detected corruption\n", stderr);
+    runtime_report_stop("The game's stack protector found its stack overwritten (memory corruption in the calling function).");
     exit(22);
 }
 static ABI void *guest_memset(void *dst, int value, size_t size) {

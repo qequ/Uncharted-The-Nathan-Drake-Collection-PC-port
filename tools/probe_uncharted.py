@@ -14,6 +14,8 @@ import time
 import shutil
 import struct
 
+import playtest_reports  # tools/playtest_reports.py
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Code patches, applied to the linked image by byte pattern (hex, "??" = any byte). A patch lists
@@ -424,6 +426,9 @@ def run_game(args, game, executable, guest_args, loadexec):
             env[runtime_key] = value
     # GPU readbacks are asynchronous in every game since 15 Oct (the runtime default; the old
     # launcher option is gone). GOW3_ASYNC_READBACK=0 in the environment restores the wait.
+    # Play-test reports (crash, freeze, F8 mark) in analysis/reports: tools/playtest_reports.py.
+    version = " ".join(value for value in (sfo_value(game, "TITLE_ID"), sfo_value(game, "APP_VER")) if value)
+    env.update(playtest_reports.environment(executable, guest_args, version))
     env["GOW3_UPSCALER"] = "none"
     if extra_mib:
         env["GOW3_DMEM_MB"] = str(5056 + extra_mib + 64)
@@ -571,8 +576,12 @@ def run_game(args, game, executable, guest_args, loadexec):
     if args.capture:
         result["capture_directory"]=str(capture)
     start = time.monotonic()
+    watcher = None
     with (out / (name + ".log")).open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        if args.boot:
+            watcher = playtest_reports.ScreenWatcher(process.pid, out / (name + ".log"), env["GOW3_REPORT_SHORT"])
+            watcher.start()
         try:
             if args.capture:
                 while process.poll() is None:
@@ -592,6 +601,15 @@ def run_game(args, game, executable, guest_args, loadexec):
             result["exit_code"] = process.wait()
             result["timed_out"] = True
     result["elapsed_seconds"] = round(time.monotonic() - start, 3)
+    if watcher:
+        watcher.stop()
+        try:
+            reports = playtest_reports.finish(out / (name + ".log"), None if result["timed_out"] else result["exit_code"],
+                                              env, env.get("GOW3_CONFIG"), watcher, executable, guest_args)
+            if reports:
+                result["reports"] = [str(folder) for folder in reports]
+        except Exception as error:  # the run's result counts more than its reports
+            print(f"Reports: not completed: {error}")
     (out / (name + ".json")).write_text(json.dumps(result, indent=2), encoding="utf-8")
     attempt = out / "attempts" / (name + "-" + str(time.time_ns()))
     attempt.mkdir(parents=True)

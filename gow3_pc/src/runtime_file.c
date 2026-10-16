@@ -286,6 +286,15 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     ++opens;
     pthread_mutex_unlock(&lock);
+    if (!dir) {
+        runtime_event("open %s",guest);
+        /* Level packages (u?data/build/main/pak<N>/ps4/<place>.pak) say where the game is going. */
+        const char *pak=strstr(guest,"/pak"), *name=strrchr(guest,'/');
+        if (pak && pak[4]>='0' && pak[4]<='9' && name && strstr(name,".pak")) {
+            printf("Level package: %s\n",name+1);
+            runtime_report_level(name+1);
+        }
+    }
     if (files[fd].traced && file_trace_line())
         printf("File trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     if (audio_trace() && (strstr(guest,"sound/") || strstr(guest,"sound1/"))) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);

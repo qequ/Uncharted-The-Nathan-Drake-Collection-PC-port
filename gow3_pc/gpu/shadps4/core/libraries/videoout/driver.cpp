@@ -44,6 +44,12 @@ extern std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 extern std::atomic<u32> g_gow3_pending_draws;
 } // namespace Vulkan
 
+// gow3: flips the game submitted, for the freeze watchdog of the play-test reports.
+static std::atomic<u64> g_gow3_flips{0};
+extern "C" uint64_t gow3gpu_flip_count(void) {
+    return g_gow3_flips.load(std::memory_order_relaxed);
+}
+
 namespace Libraries::VideoOut {
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
@@ -301,6 +307,7 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 void VideoOutDriver::Flip(const Request& req) {
+    g_gow3_flips.fetch_add(1, std::memory_order_relaxed);
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
