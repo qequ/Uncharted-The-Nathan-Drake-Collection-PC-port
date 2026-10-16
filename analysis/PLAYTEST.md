@@ -29,7 +29,7 @@ Closing the game window ends the game; the launcher's STOP does the same.
 ## Controls
 
 Controllers (DualSense, DualShock 4, Xbox) work as on the console. Keyboard and mouse, by default
-(the launcher's Controls tab changes them per game):
+(the launcher's Controls tab and the in-game page below change them per game):
 
 | PS4 button | Key | Use |
 |---|---|---|
@@ -51,9 +51,9 @@ page while you play with them (with a controller, the game's own picture). Selec
 **Enter**, then the new key or mouse button (**Esc** cancels); **Delete** clears it. A key already
 in use moves over and the other action takes the old key. Mouse sensitivity, mouse vertical
 (Normal / Flipped), the button icons and **Reset Defaults** are there too. Changes apply at once
-and are kept per game (`analysis\uncharted-user\probe-u1.ini`, `-u2`, `-u3`); the launcher's
-Controls tab still works, and whichever was changed last wins at the next start. **Esc** (or the
-key of Circle) goes back.
+and are kept per game (`analysis\uncharted-user\probe-u1.ini`, `-u2`, `-u3`), where the launcher's
+Controls tab reads and changes them too (an open launcher shows the page's changes at once).
+**Esc** (or the key of Circle) goes back.
 
 The games' button prompts ("Press F to attack") show the key or mouse button that presses them, or
 an Xbox controller's letters, following what you used last. The page's **Button Icons** choice

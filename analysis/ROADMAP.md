@@ -32,7 +32,7 @@ The port is GPL v2 or later. Its author asks that reuse credits the project and 
 | **4** Graphics, Uncharted 1 playable | Plays at 60 FPS in the tested areas (our test: the boat level) | Not played start to finish; smoke blob and bullet-hit circles; native 4K (renders at 1620p + FSR 1) |
 | **5** Uncharted 2 and 3 through LoadExec | Done: game switching, saves, audio, movies, input. 0.1.2 fixed Uncharted 3's crashes with unprotected readbacks (the bar fight, the Cartagena museum) with protected readbacks (`GOW3_ASYNC_READBACK=1`) in Uncharted 2 and 3. Our check (16 Oct, RX 9060 XT): the pub fight held 5.5 minutes at the counter-attack prompt, where unprotected readbacks had failed three times | Heavy Uncharted 2 scenes at about 50 FPS. Memory grows ~0.8 MB/s |
 | **6** Patches and packaging | Done: render resolution and memory map patches found by pattern (720p to 4K), launcher with presets, Windows package, releases with an updater, update 1.02 | - |
-| **7** PC controls | Done on our branch (16 Oct): **7.1** button prompts show the bound key or mouse button, or an Xbox pad's letters (`gpu/shim/gow3_glyphs.cpp`); **7.2** the games' own Controller Layout screen (Options, Controls) becomes a keyboard and mouse page in the game's font, where every action is rebound in place and saved per game (`gpu/shim/gow3_controls.cpp`); **7.3** the save list and the text dialog in the same look, following the bindings | The launcher (what it needs is still to be decided). The page labels the actions of the default "Aim and Fire: L2 / R2" mapping |
+| **7** PC controls | Done on our branch (16 Oct): **7.1** button prompts show the bound key or mouse button, or an Xbox pad's letters (`gpu/shim/gow3_glyphs.cpp`); **7.2** the games' own Controller Layout screen (Options, Controls) becomes a keyboard and mouse page in the game's font, where every action is rebound in place and saved per game (`gpu/shim/gow3_controls.cpp`); **7.3** the save list and the text dialog in the same look, following the bindings | The page labels the actions of the default "Aim and Fire: L2 / R2" mapping |
 
 ## Added on our branch
 
@@ -55,8 +55,10 @@ The port is GPL v2 or later. Its author asks that reuse credits the project and 
   player uses the keyboard, a page covers it with every action, its keys and mouse button, the
   mouse options and the button icon choice, in the game's own menu font (Adelon Serial, read from
   the player's `data.psarc` at start). Changes apply at once; `src/runtime_pad.c` saves them in
-  the game's settings file (`key_map`, `mouse_map`, `mouse_sens`, `mouse_invert`, `glyphs`). The
-  launcher's maps still win when they changed after the page saved (`launcher_controls`).
+  the game's settings file (`key_map`, `mouse_map`, `mouse_sens`, `mouse_invert`, `glyphs`), which
+  the launcher's Controls tab reads and writes too (it no longer passes key maps when it starts a
+  game). Maps passed in the environment (`GOW3_KEY_MAP`, tests, older launchers) win when they
+  changed after the page saved (`launcher_controls`).
 - The save list and the text dialog use the same look, the bound keys and the mouse.
 - Our Uncharted 3 default of waiting for readbacks (mode 0, 16 Oct) gave way to upstream's
   protected readbacks in the 0.1.2 merge.
@@ -66,11 +68,10 @@ The port is GPL v2 or later. Its author asks that reuse credits the project and 
 The plan (16 Oct): finish the launcher and the PC controls first, then play all three games from
 start to finish, keeping count of the crashes through the reports, and debug and fix each one.
 
-1. **Phase 7, PC controls, and the launcher**: the controls are done (16 Oct, see the table and
-   "Added on our branch"): key glyphs, the keyboard page on the games' Controller Layout screen,
-   the runtime's dialogs in the games' look. Left: **the launcher**, whose needs are still to be
-   decided with the user (its Controls tab could read and write the same per-game file as the
-   page, or give way to it).
+1. **Phase 7, PC controls, and the launcher**: done (16 Oct, see the table and "Added on our
+   branch"): key glyphs, the keyboard page on the games' Controller Layout screen, the runtime's
+   dialogs in the games' look, and the launcher's Controls tab on the same per-game settings as
+   the page (the user's choice), with the button icon choice.
 2. **Full playthroughs** of the three games with the reports ([PLAYTEST.md](PLAYTEST.md)); every
    crash, freeze or mark folder is one item to debug and fix.
 3. **Newer upstream gow3_pc**: this port branched at `08b300a` (13 Oct) and is 70+ commits behind

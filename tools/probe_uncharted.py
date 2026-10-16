@@ -425,7 +425,9 @@ def run_game(args, game, executable, guest_args, loadexec):
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded
-    # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
+    # Keyboard and mouse: the keys, mouse look and button icons are in the game's settings file
+    # (the launcher's Controls tab and the in-game page write them); the launcher passes only the
+    # mouse switch here. Earlier launchers passed their maps too (explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),
                                       ("MOUSE_INVERT", "GOW3_MOUSE_INVERT")):

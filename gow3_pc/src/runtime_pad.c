@@ -1,11 +1,10 @@
 /* libScePad on SDL3 gamepads, with keyboard and mouse. SDL events are pumped by the window
  * thread (gpu/shim/window.cpp); here state is only sampled.
  *
- * Default keyboard and mouse layout (GOW3_KEY_MAP / GOW3_MOUSE_MAP change it, see
- * apply_button_map; the launcher's Controls tab writes them). The games' Controller Layout
- * screen shows a keyboard page (gpu/shim/gow3_controls.cpp) that changes them in game; those are
- * saved in the game's settings file (runtime_pad_set_bindings) and win at the next start unless
- * the launcher's changed since:
+ * Default keyboard and mouse layout. The game's settings file changes it (key_map, mouse_map,
+ * mouse_sens, mouse_invert, glyphs: the launcher's Controls tab and the keyboard page on the games'
+ * Controller Layout screen, gpu/shim/gow3_controls.cpp, write them), and so do GOW3_KEY_MAP /
+ * GOW3_MOUSE_MAP (see apply_button_map; tests):
  *   WASD left stick, mouse (or the arrow keys) right stick, right mouse L2 (aim), left mouse
  *   R2 (fire), Space Cross (jump), Left Ctrl Circle (cover, roll), F Square (melee),
  *   R Triangle (reload, pick up), Q / mouse X1 L1, E / mouse X2 R1, Left Shift L3,
@@ -312,11 +311,15 @@ static void load_button_maps(void) {
     static char saved_keys[2048], saved_mouse[1024], saved_sens[32], saved_invert[8], saved_glyphs[32];
     char stamp[32], saved_stamp[32];
     launcher_stamp(stamp,sizeof(stamp));
-    const int saved=settings_value("key_map",saved_keys,sizeof(saved_keys)) &&
-                    settings_value("launcher_controls",saved_stamp,sizeof(saved_stamp)) && !strcmp(saved_stamp,stamp);
-    if (saved) {
-        keys_spec=saved_keys;
-        if (settings_value("mouse_map",saved_mouse,sizeof(saved_mouse))) mouse_spec=saved_mouse;
+    /* The settings file's controls (the launcher's Controls tab and the keyboard page write them):
+     * used unless the environment brings others (tests, earlier launchers) that changed
+     * since the page last saved. */
+    const int from_environment=keys_spec || mouse_spec || sens || invert;
+    int saved=0;
+    if (!from_environment || (settings_value("launcher_controls",saved_stamp,sizeof(saved_stamp)) &&
+                              !strcmp(saved_stamp,stamp))) {
+        if (settings_value("key_map",saved_keys,sizeof(saved_keys))) { keys_spec=saved_keys; saved=1; }
+        if (settings_value("mouse_map",saved_mouse,sizeof(saved_mouse))) { mouse_spec=saved_mouse; saved=1; }
         if (settings_value("mouse_sens",saved_sens,sizeof(saved_sens))) sens=saved_sens;
         if (settings_value("mouse_invert",saved_invert,sizeof(saved_invert))) invert=saved_invert;
     }
@@ -330,7 +333,7 @@ static void load_button_maps(void) {
     glyph_mode=glyph_mode_of(glyphs);
     if (pad || keys || mouse)
         printf("Runtime: pad map: %d gamepad, %d keyboard and %d mouse entries%s\n",pad,keys,mouse,
-               saved ? " (the controls saved in game)" : "");
+               saved ? " (from the game's settings file)" : "");
 }
 
 static void key_axis(uint8_t *axis, bool negative, bool positive) {

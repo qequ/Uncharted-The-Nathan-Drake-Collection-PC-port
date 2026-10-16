@@ -54,7 +54,10 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   queued; background shader compilation; multithreaded rendering (experimental).
 - **Keyboard and mouse:** mouse look (sensitivity, invert Y), right mouse aim, left mouse fire, WASD,
   and every action remappable per game in the **Controls** tab (two bindings per action, keys or
-  mouse buttons). Controllers (DualSense, DualShock 4, Xbox) work at the same time.
+  mouse buttons), or in game: Options > Controls > **Controller Layout** shows a keyboard and mouse
+  page in the game's own style while you play with them. Both change the same settings. The games'
+  button prompts show your keys, or an Xbox controller's buttons. Controllers (DualSense,
+  DualShock 4, Xbox) work at the same time.
 - **Game update 1.02** is used automatically when it sits next to the game folder (see below).
 - Log and save folders, desktop shortcut, shader cache reset, game folder selection, links to the
   author's [YouTube](https://www.youtube.com/@BilalReloaded/videos) and GitHub.

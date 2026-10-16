@@ -77,11 +77,12 @@ INI_DEFAULTS = {
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True}
 GAME_KEYS = ("u1", "u2", "u3")
 GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "multithreaded": False,
-                         "async_readback": False, "controls": None, "mouse": True, "mouse_sens": "1.0",
-                         "mouse_invert": False}
+                         "async_readback": False, "mouse": True}
 
-# Keyboard and mouse controls (runtime_pad.c): action -> up to two bindings, "key:<SDL key name>"
-# or "mouse:<left|middle|right|x1|x2|wheel_up|wheel_down>". Stick directions take keys only.
+# Keyboard and mouse controls (runtime_pad.c): action -> bindings, "key:<SDL key name>" or
+# "mouse:<left|middle|right|x1|x2|wheel_up|wheel_down>"; stick directions take keys only. They are
+# kept in the game's settings file (key_map, mouse_map, mouse_sens, mouse_invert, glyphs), which the
+# in-game page on the games' Controller Layout screen (Options, Controls) reads and writes too.
 CONTROL_GROUPS = (
     ("MOVEMENT", (("ls_up", "Move forward"), ("ls_down", "Move back"), ("ls_left", "Move left"),
                   ("ls_right", "Move right"), ("rs_up", "Look up"), ("rs_down", "Look down"),
@@ -110,6 +111,8 @@ MOUSE_SENSITIVITIES = [("0.5", "0.5x"), ("0.75", "0.75x"), ("1.0", "1x"), ("1.5"
                        ("3.0", "3x")]
 MOUSE_LABELS = {"left": "Left mouse", "middle": "Middle mouse", "right": "Right mouse", "x1": "Mouse back",
                 "x2": "Mouse forward", "wheel_up": "Wheel up", "wheel_down": "Wheel down"}
+# Button prompts in the games (gpu/shim/gow3_glyphs.cpp): what they show.
+GLYPH_STYLES = [("auto", "Automatic"), ("keyboard", "Keyboard"), ("xbox", "Xbox"), ("playstation", "PlayStation")]
 # Tk key names -> SDL key names (letters and digits map to themselves, upper case).
 TK_TO_SDL = {
     "space": "Space", "Return": "Return", "Escape": "Escape", "Tab": "Tab", "BackSpace": "Backspace",
@@ -118,6 +121,7 @@ TK_TO_SDL = {
     "Left": "Left", "Right": "Right", "Delete": "Delete", "Home": "Home", "End": "End", "Prior": "PageUp",
     "Next": "PageDown", "minus": "-", "equal": "=", "bracketleft": "[", "bracketright": "]",
     "backslash": "\\", "semicolon": ";", "apostrophe": "'", "grave": "`", "period": ".", "slash": "/",
+    "comma": "#54",
     "KP_Divide": "Keypad /", "KP_Multiply": "Keypad *", "KP_Subtract": "Keypad -", "KP_Add": "Keypad +",
     "KP_Enter": "Keypad Enter", "KP_Decimal": "Keypad .", "Pause": "Pause", "Scroll_Lock": "ScrollLock",
 }
@@ -125,15 +129,39 @@ TK_TO_SDL.update({f"F{n}": f"F{n}" for n in range(1, 13)})
 TK_TO_SDL.update({f"KP_{n}": f"Keypad {n}" for n in range(10)})
 # Keys the runtime keeps for itself: Insert opens the in-game menu, F8 marks a moment for a
 # play-test report (analysis/reports), F9 records the pad.
-RESERVED_KEYS = {"Insert", "F8", "F9", "comma"}
+RESERVED_KEYS = {"Insert", "F8", "F9"}
 
 
 def merged_controls(controls):
     merged = {action: list(bindings) for action, bindings in DEFAULT_CONTROLS.items()}
     for action, bindings in (controls or {}).items():
         if action in merged:
-            merged[action] = list(bindings)[:2]
+            merged[action] = list(bindings)[:3]
     return merged
+
+
+def controls_from_ini(values):
+    """The controls in a game's settings file (key_map and mouse_map list every action), or None
+    when it has none (the runtime's defaults)."""
+    if "key_map" not in values and "mouse_map" not in values:
+        return None
+    controls = merged_controls(None)
+    for spec, kind in ((values.get("key_map"), "key"), (values.get("mouse_map"), "mouse")):
+        if spec is None:
+            continue
+        seen = set()
+        for entry in spec.split(","):
+            action, _, name = entry.partition("=")
+            action, name = action.strip(), name.strip()
+            if action not in controls:
+                continue
+            if action not in seen:  # the file's first entry replaces the default of its kind
+                seen.add(action)
+                controls[action] = [b for b in controls[action] if not b.startswith(kind + ":")]
+            if name:
+                controls[action].append(f"{kind}:{name}")
+    # Keys first, then the mouse button (two keys and a mouse button at most).
+    return {a: sorted(b, key=lambda x: x.startswith("mouse:"))[:3] for a, b in controls.items()}
 
 
 def control_maps(controls):
@@ -153,7 +181,18 @@ def binding_label(binding):
     if not binding:
         return "—"
     kind, _, name = binding.partition(":")
+    if kind == "key" and name.startswith("#"):  # a scancode number (runtime_pad.c)
+        return {"#54": ","}.get(name, f"Key {name[1:]}")
     return MOUSE_LABELS.get(name, name) if kind == "mouse" else name
+
+
+def sensitivity_choice(value):
+    """The sensitivity choice nearest a saved value (the in-game page has finer steps)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 1.0
+    return min(MOUSE_SENSITIVITIES, key=lambda option: abs(float(option[0]) - number))[0]
 
 
 def is_game_dir(folder):
@@ -373,9 +412,25 @@ def read_config():
         for game, entry in games.items():
             if entry["preset"] in PRESETS:
                 write_ini(game, {"frames_queued": "1"})
+    # Version 7: keyboard and mouse controls move to each game's settings file, where the in-game
+    # page (the Controller Layout screen) changes them too. Custom ones are written there once.
+    if config.get("version", 1) < 7:
+        for game, entry in games.items():
+            updates = {}
+            if entry.get("controls"):
+                updates["key_map"], updates["mouse_map"] = control_maps(entry["controls"])
+            if str(entry.get("mouse_sens", "1.0")) not in ("1", "1.0", "1.00"):
+                updates["mouse_sens"] = str(entry["mouse_sens"])
+            if entry.get("mouse_invert"):
+                updates["mouse_invert"] = "1"
+            if updates and "key_map" not in read_ini(game):
+                write_ini(game, updates)
+    for entry in games.values():
+        for name in ("controls", "mouse_sens", "mouse_invert"):
+            entry.pop(name, None)
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
-    config["version"] = 6
+    config["version"] = 7
     return config
 
 
@@ -666,8 +721,9 @@ class Launcher:
             self.widgets["multithreaded"].set(settings["multithreaded"])
         if isinstance(self.widgets.get("mouse"), Toggle):
             self.widgets["mouse"].set(settings.get("mouse", True))
-            self.widgets["mouse_sens"].set(settings.get("mouse_sens", "1.0"))
-            self.widgets["mouse_invert"].set(settings.get("mouse_invert", False))
+            self.widgets["mouse_sens"].set(sensitivity_choice(self.ini.get("mouse_sens", "1.0")))
+            self.widgets["mouse_invert"].set(self.ini.get("mouse_invert", "0") == "1")
+            self.widgets["glyphs"].set(self.ini.get("glyphs", "auto"))
         if hasattr(self, "binding_slots"):
             self.refresh_bindings()
         self.sync_sharpening()
@@ -932,17 +988,27 @@ class Launcher:
                                        lambda v: self.change_game_setting("mouse", v))
         self.widgets["mouse"].pack(side="left", padx=(self.px(8), self.px(22)))
         tk.Label(top, text="Sensitivity", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
-        self.widgets["mouse_sens"] = Segmented(top, MOUSE_SENSITIVITIES, settings.get("mouse_sens", "1.0"),
-                                               lambda v: self.change_game_setting("mouse_sens", v), self.f_small)
+        self.widgets["mouse_sens"] = Segmented(top, MOUSE_SENSITIVITIES,
+                                               sensitivity_choice(self.ini.get("mouse_sens", "1.0")),
+                                               lambda v: self.save_controls_setting("mouse_sens", v), self.f_small)
         self.widgets["mouse_sens"].pack(side="left", padx=(self.px(8), self.px(22)))
         tk.Label(top, text="Invert Y", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
-        self.widgets["mouse_invert"] = Toggle(top, self.s, settings.get("mouse_invert", False),
-                                              lambda v: self.change_game_setting("mouse_invert", v))
+        self.widgets["mouse_invert"] = Toggle(top, self.s, self.ini.get("mouse_invert", "0") == "1",
+                                              lambda v: self.save_controls_setting("mouse_invert", "1" if v else "0"))
         self.widgets["mouse_invert"].pack(side="left", padx=(self.px(8), 0))
         self.flat_button(top, "Reset controls", self.reset_controls).pack(side="right")
+        icons = tk.Frame(page, bg=BG)
+        icons.pack(side="top", fill="x", pady=(self.px(8), 0))
+        tk.Label(icons, text="Button icons", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
+        self.widgets["glyphs"] = Segmented(icons, GLYPH_STYLES, self.ini.get("glyphs", "auto"),
+                                           lambda v: self.save_controls_setting("glyphs", v), self.f_small)
+        self.widgets["glyphs"].pack(side="left", padx=(self.px(8), self.px(12)))
+        tk.Label(icons, text="Automatic: keys or the controller's buttons, whichever you used last.",
+                 font=self.f_small, bg=BG, fg=MUTED).pack(side="left")
         self.controls_hint = tk.Label(
             page, text="Click a slot, then press a key or a mouse button (right-click a slot to clear it). "
-                       "In game the mouse is captured; Alt+Tab or Insert (menu) frees it. A controller "
+                       "In game, Options > Controls > Controller Layout shows and changes the same keys. "
+                       "The mouse is captured in game; Alt+Tab or Insert (menu) frees it. A controller "
                        "always works too.", font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
             wraplength=self.px(1080))
         self.controls_hint.pack(side="top", fill="x", pady=(self.px(6), self.px(4)))
@@ -988,7 +1054,18 @@ class Launcher:
         return page
 
     def game_controls(self):
-        return merged_controls(self.game_settings().get("controls"))
+        """The selected game's controls as its settings file has them (the in-game page writes
+        it too), else the defaults."""
+        return controls_from_ini(self.ini) or merged_controls(None)
+
+    def save_controls(self, controls):
+        keys, mouse = control_maps(controls)
+        self.ini["key_map"], self.ini["mouse_map"] = keys, mouse
+        self.save_ini({"key_map": keys, "mouse_map": mouse})
+
+    def save_controls_setting(self, key, value):
+        self.ini[key] = value
+        self.save_ini({key: value})
 
     def refresh_bindings(self):
         controls = self.game_controls()
@@ -1068,9 +1145,8 @@ class Launcher:
         while len(bindings) <= slot:
             bindings.append(None)
         bindings[slot] = binding
-        controls[action] = [b for b in bindings if b][:2]
-        self.game_settings()["controls"] = controls
-        write_config(self.config)
+        controls[action] = [b for b in bindings if b][:3]
+        self.save_controls(controls)
         self.controls_hint.config(
             text="Saved for " + self.current_game()["name"] + ". Click a slot, then press a key or a mouse button "
                  "(right-click a slot to clear it).", fg=MUTED)
@@ -1083,9 +1159,11 @@ class Launcher:
         name = self.current_game()["name"]
         if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s keyboard and mouse controls?"):
             return
-        settings = self.game_settings()
-        settings.update({"controls": None, "mouse": True, "mouse_sens": "1.0", "mouse_invert": False})
+        self.game_settings()["mouse"] = True
         write_config(self.config)
+        self.save_controls(merged_controls(None))
+        for key, value in (("mouse_sens", "1.0"), ("mouse_invert", "0"), ("glyphs", "auto")):
+            self.save_controls_setting(key, value)
         self.refresh_controls()
 
     def page_advanced(self):
@@ -1344,12 +1422,9 @@ class Launcher:
             settings = self.config["games"][key]
             env[f"UNCHARTED_RESOLUTION_{key.upper()}"] = settings["resolution"]
             env[f"UNCHARTED_MULTITHREADED_{key.upper()}"] = "1" if settings["multithreaded"] else "0"
-            keys, mouse = control_maps(settings.get("controls"))
-            env[f"UNCHARTED_KEY_MAP_{key.upper()}"] = keys
-            env[f"UNCHARTED_MOUSE_MAP_{key.upper()}"] = mouse
+            # The keys, mouse look and button icons are in the game's settings file (Controls tab
+            # and the in-game page); only the mouse switch goes this way.
             env[f"UNCHARTED_MOUSE_{key.upper()}"] = "1" if settings.get("mouse", True) else "0"
-            env[f"UNCHARTED_MOUSE_SENS_{key.upper()}"] = settings.get("mouse_sens", "1.0")
-            env[f"UNCHARTED_MOUSE_INVERT_{key.upper()}"] = "1" if settings.get("mouse_invert") else "0"
         python = Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
             python = python.with_name("python.exe")
