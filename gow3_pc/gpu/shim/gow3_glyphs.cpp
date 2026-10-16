@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -59,6 +60,10 @@ constexpr Known known[] = {
     {0x8d03f2ff457f032dull, RoleColor, "Uncharted 3"},
     {0xae0c06306763d424ull, RoleAlpha, "Uncharted 3"},
 };
+// The Controller Layout screen's DualShock 4 picture, the same in the three games: XXH3 of the
+// first MiB of its 1D-tiled level 0 (2048x1024 RGBA8, 12 levels).
+constexpr uint64_t LayoutHash = 0x2975955b93afa5e7ull;
+constexpr int LayoutWidth = 2048, LayoutHeight = 1024, LayoutLevels = 12;
 
 // 1D-thin tiling of 32-bit texels: 8x8 tiles in rows, the texels of a tile in Morton order
 // (x0 y0 x1 y1 x2 y2).
@@ -738,6 +743,13 @@ Published published;  // what to upload, per role
 Gow3GlyphState wanted{};
 bool have_wanted = false, pending = false, worker_started = false;
 std::atomic<uint32_t> generation{1};
+std::atomic<int64_t> layout_seen_ms{INT64_MIN / 2};
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 const char* StyleName(int style) {
     switch (style) {
@@ -803,14 +815,27 @@ void Schedule() {
 } // namespace
 
 bool Candidate(uint32_t width, uint32_t height, bool rgba8, uint32_t levels, bool thin_1d) {
-    return width == AtlasSize && height == AtlasSize && rgba8 && levels == 1 && thin_1d;
+    return rgba8 && thin_1d &&
+           ((width == AtlasSize && height == AtlasSize && levels == 1) ||
+            (width == LayoutWidth && height == LayoutHeight && levels == LayoutLevels));
 }
 
 Role Identify(const uint8_t* guest, uint32_t size) {
+    if (size < AtlasBytes) {
+        return RoleNone;
+    }
+    const uint64_t hash = XXH3_64bits(guest, AtlasBytes);
+    if (hash == LayoutHash) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) {
+            std::printf("Glyphs: the Controller Layout screen's picture found\n");
+            std::fflush(stdout);
+        }
+        return RoleLayout;
+    }
     if (size != AtlasBytes) {
         return RoleNone;
     }
-    const uint64_t hash = XXH3_64bits(guest, size);
     for (const Known& k : known) {
         if (k.hash != hash) {
             continue;
@@ -839,6 +864,19 @@ std::shared_ptr<const std::vector<uint8_t>> Pixels(Role role) {
     return role < published.size() ? published[role] : nullptr;
 }
 
+void LayoutSeen() {
+    layout_seen_ms.store(NowMs(), std::memory_order_relaxed);
+}
+
+int64_t LayoutAge() {
+    return NowMs() - layout_seen_ms.load(std::memory_order_relaxed);
+}
+
+Gow3GlyphState State() {
+    std::scoped_lock lock{mutex};
+    return wanted;
+}
+
 } // namespace Gow3Glyphs
 
 extern "C" void gow3gpu_glyphs_set(const Gow3GlyphState* state) {
@@ -847,9 +885,14 @@ extern "C" void gow3gpu_glyphs_set(const Gow3GlyphState* state) {
     if (have_wanted && !std::memcmp(&wanted, state, sizeof(wanted))) {
         return;
     }
+    // The device used last alone changes no icon (a forced style): nothing to redraw.
+    Gow3GlyphState icons = *state, before = wanted;
+    icons.keyboard_last = before.keyboard_last = 0;
+    const bool redraw = !have_wanted || std::memcmp(&icons, &before, sizeof(icons)) != 0;
     wanted = *state;
     have_wanted = true;
-    if (!originals[RoleRgba].empty() || !originals[RoleColor].empty() || !originals[RoleAlpha].empty()) {
+    if (redraw &&
+        (!originals[RoleRgba].empty() || !originals[RoleColor].empty() || !originals[RoleAlpha].empty())) {
         Schedule();
     }
 }

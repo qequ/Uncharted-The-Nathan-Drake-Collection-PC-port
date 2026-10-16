@@ -13,6 +13,7 @@
 
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "gow3_glyphs.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -3092,7 +3093,12 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
 
 void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
-        texture_cache.GetImage(image_id).binding = {};
+        auto& image = texture_cache.GetImage(image_id);
+        image.binding = {};
+        // gow3: the games' Controller Layout screen is up (gow3_glyphs.h).
+        if (image.gow3_glyph == Gow3Glyphs::RoleLayout) [[unlikely]] {
+            Gow3Glyphs::LayoutSeen();
+        }
     }
     for (const auto [buffer, offset, size, is_written] : bound_buffers) {
         const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader

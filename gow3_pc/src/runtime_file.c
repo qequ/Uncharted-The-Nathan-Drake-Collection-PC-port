@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <time.h>
 #include "runtime.h"
+#include "gpu/gow3gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,6 +117,8 @@ static int translate(const char *guest,char *out,size_t size) {
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     return result;
 }
+/* gow3gpu.h: the keyboard page reads the game's menu font from its archive. */
+int runtime_file_host_path(const char *guest,char *out,size_t size) { return translate(guest,out,size); }
 int32_t runtime_file_available_space_kb(const char *guest,uint64_t *kb) {
     if (!guest || !kb) return ERR(22);
     char host[1024];

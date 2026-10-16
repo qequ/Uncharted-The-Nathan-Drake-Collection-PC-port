@@ -1767,7 +1767,8 @@ void TextureCache::InvalidateGlyphs() {
             continue;
         }
         Image& image = slot_images[image_id];
-        if (!image.gow3_glyph || False(image.flags & ImageFlagBits::Registered)) {
+        if (!image.gow3_glyph || image.gow3_glyph == Gow3Glyphs::RoleLayout ||
+            False(image.flags & ImageFlagBits::Registered)) {
             continue;
         }
         InvalidateAlias(image);

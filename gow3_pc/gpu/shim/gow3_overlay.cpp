@@ -10,10 +10,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 #include <SDL3/SDL.h>
+#include "gow3_controls.h"
+#include "gow3_glyphs.h"
 #include "gow3_settings.h"
+#include "gow3_ui.h"
 #include "core/emulator_settings.h"
 #include "gow3_graphics.h"
 #include "gow3_perf_stats.h"
@@ -73,6 +77,9 @@ std::atomic<bool> choice_active{false};
 std::string choice_title;
 std::vector<std::string> choice_items;
 int choice_index = 0;
+int choice_first = 0;              // the first row shown (long lists scroll)
+std::vector<ImVec4> choice_rects;  // each row as last drawn (x0, y0, x1, y1), for the mouse
+Gow3Bindings choice_bindings{};     // the keys of the moment the list opened
 std::atomic<int> choice_result{-1}; // -1 open, -2 cancelled, else the chosen index
 // Save pictures: decoded by BeginChoice, made textures on the present thread (null = none).
 // Closed lists' textures wait in choice_retired until the backend has destroyed them.
@@ -511,81 +518,145 @@ void Menu() {
     }
 }
 
-// The game's text dialog: what is typed, and how to finish (keyboard or controller).
-void TextEntryBox() {
+// The game's 16:9 picture within the display, and its scale against 1080p.
+struct GameFrame {
+    float x, y, w, h, s;
+};
+GameFrame Frame16x9() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.42f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.32f, 0.0f),
-                                        ImVec2(viewport->WorkSize.x * 0.8f, FLT_MAX));
-    ImGui::SetNextWindowBgAlpha(0.92f);
-    ImGui::Begin("##text_entry", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", text_entry_prompt.c_str());
-    ImGui::Separator();
-    ImGui::SetWindowFontScale(1.4f);
-    ImGui::Text("%s_", text_entry_text.c_str());
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::Separator();
-    ImGui::TextDisabled("Keyboard: type, Backspace to erase, Enter = OK, Esc = cancel");
-    ImGui::TextDisabled("Controller: Cross (A) = OK, Circle (B) = cancel");
-    ImGui::End();
+    GameFrame f{viewport->WorkPos.x, viewport->WorkPos.y, viewport->WorkSize.x, viewport->WorkSize.y, 1.0f};
+    if (f.w > f.h * 16.0f / 9.0f) {
+        f.x += (f.w - f.h * 16.0f / 9.0f) * 0.5f;
+        f.w = f.h * 16.0f / 9.0f;
+    } else {
+        f.y += (f.h - f.w * 9.0f / 16.0f) * 0.5f;
+        f.h = f.w * 9.0f / 16.0f;
+    }
+    f.s = f.h / 1080.0f;
+    return f;
 }
 
+// One item of a dialog's help line, as the games show them: the key (keyboard and mouse) or the
+// pad's button for a PS4 button, then what it does. Returns where the next one starts.
+float HelpItem(ImDrawList* dl, float x, float y, float s, int bind, int key, const char* text,
+               const Gow3GlyphState& pad) {
+    const float h = 32.0f * s, size = 32.0f * s;
+    x += pad.keyboard_last ? Gow3Ui::Keycap(dl, x, y, h, key, false) : Gow3Ui::PadButton(dl, x, y, h, bind, pad);
+    x += 12.0f * s;
+    x += Gow3Ui::Text(dl, ImVec2(x, y - size * 0.55f), text, size, Gow3Ui::Cream);
+    return x + 34.0f * s;
+}
+
+// The first key of a PS4 button as bound now, or `fallback`.
+int BoundKey(int bind, int fallback) {
+    return choice_bindings.key[bind][0] > 0 ? choice_bindings.key[bind][0] : fallback;
+}
+
+// The game's text dialog: what is typed, and how to finish (keyboard or controller).
+void TextEntryBox() {
+    const GameFrame f = Frame16x9();
+    const float s = f.s;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const float width = std::min(1100.0f * s, f.w * 0.8f), height = 236.0f * s;
+    const ImVec2 p0(f.x + (f.w - width) * 0.5f, f.y + f.h * 0.42f - height * 0.5f);
+    const ImVec2 p1(p0.x + width, p0.y + height);
+    Gow3Ui::Panel(dl, p0, p1, s);
+    Gow3Ui::TextFit(dl, ImVec2(p0.x + 40.0f * s, p0.y + 24.0f * s), text_entry_prompt, 40.0f * s,
+                    width - 80.0f * s, Gow3Ui::Cream);
+    Gow3Ui::Rule(dl, ImVec2(p0.x + 40.0f * s, p0.y + 78.0f * s), ImVec2(p1.x - 40.0f * s, p0.y + 78.0f * s), s);
+    const bool caret = NowMs() % 1000 < 600;
+    Gow3Ui::TextFit(dl, ImVec2(p0.x + 40.0f * s, p0.y + 96.0f * s), text_entry_text + (caret ? "_" : " "),
+                    48.0f * s, width - 80.0f * s, Gow3Ui::White);
+    // Typing needs the keyboard's keys: Enter and Esc finish it there, the pad's Cross and Circle
+    // (window.cpp).
+    const Gow3GlyphState pad = Gow3Glyphs::State();
+    float x = p0.x + 40.0f * s;
+    const float y = p1.y - 40.0f * s;
+    x = HelpItem(dl, x, y, s, GOW3_BIND_CROSS, SDL_SCANCODE_RETURN, "OK", pad);
+    x = HelpItem(dl, x, y, s, GOW3_BIND_CIRCLE, SDL_SCANCODE_ESCAPE, "Cancel", pad);
+    if (pad.keyboard_last) {
+        HelpItem(dl, x, y, s, GOW3_BIND_CROSS, SDL_SCANCODE_BACKSPACE, "Erase", pad);
+    }
+}
+
+// The game's save list, in the games' look: the choice under a highlight bar, the save
+// pictures beside the names, the keys or buttons that choose and go back.
 void ChoiceBox() {
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.36f, 0.0f),
-                                        ImVec2(viewport->WorkSize.x * 0.8f, viewport->WorkSize.y * 0.8f));
-    ImGui::SetNextWindowBgAlpha(0.94f);
-    ImGui::Begin("##choice", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", choice_title.c_str());
-    ImGui::Separator();
+    const GameFrame f = Frame16x9();
+    const float s = f.s;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
     // Save pictures are 228x128; rows without one keep the text aligned when others have one.
     const bool pictures = std::any_of(choice_textures.begin(), choice_textures.end(),
                                       [](ImTextureData* tex) { return tex != nullptr; });
-    const ImVec2 picture_size(228.0f * base_scale, 128.0f * base_scale);
-    for (int i = 0; i < int(choice_items.size()); ++i) {
+    const int count = int(choice_items.size());
+    // An entry's lines (the runtime's save entries: title, subtitle, date): the first larger.
+    size_t most_lines = 1;
+    for (const std::string& item : choice_items) {
+        most_lines = std::max<size_t>(most_lines, size_t(std::count(item.begin(), item.end(), '\n')) + 1);
+    }
+    most_lines = std::min<size_t>(most_lines, 4);
+    const float row_height = std::max(pictures ? 118.0f : 50.0f, 18.0f + 38.0f + 31.0f * float(most_lines - 1)) * s;
+    const int visible = std::clamp(int(f.h * 0.6f / row_height), 1, std::max(count, 1));
+    choice_first = std::clamp(choice_first, std::max(0, choice_index - visible + 1), std::max(choice_index, 0));
+    choice_first = std::clamp(choice_first, 0, std::max(0, count - visible));
+    const float width = std::min((pictures ? 1180.0f : 960.0f) * s, f.w * 0.84f);
+    const float height = 112.0f * s + float(std::min(visible, std::max(count, 1))) * row_height + 92.0f * s;
+    const ImVec2 p0(f.x + (f.w - width) * 0.5f, f.y + (f.h - height) * 0.5f), p1(p0.x + width, p0.y + height);
+    Gow3Ui::Panel(dl, p0, p1, s);
+    Gow3Ui::TextFit(dl, ImVec2(p0.x + 44.0f * s, p0.y + 26.0f * s), choice_title, 44.0f * s, width - 88.0f * s,
+                    Gow3Ui::Cream);
+    Gow3Ui::Rule(dl, ImVec2(p0.x + 44.0f * s, p0.y + 90.0f * s), ImVec2(p1.x - 44.0f * s, p0.y + 90.0f * s), s);
+    choice_rects.assign(size_t(count), ImVec4(0, 0, 0, 0));
+    for (int i = choice_first; i < std::min(count, choice_first + visible); ++i) {
+        const float y = p0.y + 104.0f * s + float(i - choice_first) * row_height;
         const bool selected = i == choice_index;
-        ImGui::BeginGroup();
-        ImTextureData* tex = i < int(choice_textures.size()) ? choice_textures[i] : nullptr;
-        if (tex) {
-            ImGui::Image(tex->GetTexRef(), picture_size);
-        } else if (pictures) {
-            ImGui::Dummy(picture_size);
+        choice_rects[size_t(i)] = ImVec4(p0.x + 24.0f * s, y, p1.x - 24.0f * s, y + row_height);
+        if (selected) {
+            Gow3Ui::Highlight(dl, ImVec2(p0.x + 24.0f * s, y + 2.0f * s), ImVec2(p1.x - 24.0f * s, y + row_height - 2.0f * s));
         }
+        float x = p0.x + 48.0f * s;
         if (pictures) {
-            ImGui::SameLine();
-        }
-        if (selected) {
-            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.55f, 1.0f), "> %s", choice_items[i].c_str());
-        } else {
-            ImGui::Text("  %s", choice_items[i].c_str());
-        }
-        ImGui::EndGroup();
-        if (selected) {
-            if (pictures) {
-                const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-                const float pad = 3.0f * base_scale;
-                ImGui::GetWindowDrawList()->AddRect(ImVec2(min.x - pad, min.y - pad),
-                                                    ImVec2(max.x + pad, max.y + pad),
-                                                    IM_COL32(255, 230, 140, 255), 0.0f, 0,
-                                                    2.0f * base_scale);
+            ImTextureData* tex = i < int(choice_textures.size()) ? choice_textures[size_t(i)] : nullptr;
+            const ImVec2 a(x, y + 9.0f * s), b(x + 178.0f * s, y + 9.0f * s + 100.0f * s);
+            if (tex) {
+                dl->AddImage(tex->GetTexRef(), a, b);
+                dl->AddRect(a, b, selected ? Gow3Ui::White : IM_COL32(120, 116, 108, 255), 0.0f, 0, 1.5f * s);
             }
-            ImGui::SetScrollHereY();
+            x = b.x + 26.0f * s;
+        }
+        std::vector<std::string_view> lines;
+        for (std::string_view rest = choice_items[size_t(i)]; lines.size() < 4;) {
+            const size_t end = rest.find('\n');
+            lines.push_back(rest.substr(0, end));
+            if (end == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(end + 1);
+        }
+        float ty = y + (row_height - (38.0f + 31.0f * float(lines.size() - 1)) * s) * 0.5f;
+        for (size_t l = 0; l < lines.size(); ++l) {
+            const float size = (l ? 28.0f : 36.0f) * s;
+            Gow3Ui::TextFit(dl, ImVec2(x, ty), lines[l], size, p1.x - 48.0f * s - x,
+                            l ? Gow3Ui::CreamDim : selected ? Gow3Ui::White : Gow3Ui::Cream);
+            ty += (l ? 31.0f : 38.0f) * s;
         }
     }
-    ImGui::Separator();
-    ImGui::TextDisabled("Up/Down or D-pad: choose   Enter or Cross (A): OK   Esc or Circle (B): cancel");
-    ImGui::End();
+    // More above or below: small arrows at the right.
+    const float ax = p1.x - 40.0f * s, a = 9.0f * s;
+    if (choice_first > 0) {
+        const float ay = p0.y + 112.0f * s;
+        dl->AddTriangleFilled(ImVec2(ax, ay - a), ImVec2(ax + a, ay + a * 0.6f), ImVec2(ax - a, ay + a * 0.6f), Gow3Ui::Cream);
+    }
+    if (choice_first + visible < count) {
+        const float ay = p1.y - 96.0f * s;
+        dl->AddTriangleFilled(ImVec2(ax, ay + a), ImVec2(ax - a, ay - a * 0.6f), ImVec2(ax + a, ay - a * 0.6f), Gow3Ui::Cream);
+    }
+    const Gow3GlyphState pad = Gow3Glyphs::State();
+    const float y = p1.y - 40.0f * s;
+    Gow3Ui::Rule(dl, ImVec2(p0.x + 44.0f * s, y - 30.0f * s), ImVec2(p1.x - 44.0f * s, y - 30.0f * s), s);
+    float x = p0.x + 44.0f * s;
+    x = HelpItem(dl, x, y, s, GOW3_BIND_CROSS, BoundKey(GOW3_BIND_CROSS, SDL_SCANCODE_RETURN), "Select", pad);
+    HelpItem(dl, x, y, s, GOW3_BIND_CIRCLE, BoundKey(GOW3_BIND_CIRCLE, SDL_SCANCODE_ESCAPE), "Back", pad);
 }
 
 void LoadingScreen() {
@@ -726,6 +797,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     }
     overlay_instance = &instance;
     initialized = true;
+    Gow3Ui::Start(); // the game's menu font, read from its archive meanwhile
     std::printf("Overlay: menu ready (Insert or R3+L2)\n");
 }
 
@@ -785,24 +857,72 @@ void UpdateChoiceTextures() {
     choice_retiring = !choice_retired.empty();
 }
 
-// The save list takes the keys and buttons that move and confirm; the rest stays with the game
-// (held neutral by CapturesInput).
+// The save list takes the keys and buttons that move and choose (the game's own, as bound, and
+// the usual PC ones), and the mouse; the rest stays with the game (held neutral by CapturesInput).
 bool HandleChoiceEvent(const SDL_Event& event) {
     int move = 0, finish = 0; // finish: 1 accept, 2 cancel
-    if (event.type == SDL_EVENT_KEY_DOWN) {
-        const SDL_Keycode key = event.key.key;
-        move = key == SDLK_UP || key == SDLK_W ? -1 : key == SDLK_DOWN || key == SDLK_S ? 1 : 0;
-        finish = key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ? 1
-                 : key == SDLK_ESCAPE || key == SDLK_BACKSPACE                   ? 2
-                                                                                 : 0;
-    } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-        const u8 button = event.gbutton.button;
-        move = button == SDL_GAMEPAD_BUTTON_DPAD_UP ? -1 : button == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 0;
-        finish = button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : button == SDL_GAMEPAD_BUTTON_EAST ? 2 : 0;
-    } else {
-        return event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP;
-    }
     const int count = int(choice_items.size());
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN: {
+        const int code = int(event.key.scancode);
+        const auto bound = [&](int bind) {
+            return code > 0 && (choice_bindings.key[bind][0] == code || choice_bindings.key[bind][1] == code);
+        };
+        move = code == SDL_SCANCODE_UP || code == SDL_SCANCODE_W || bound(GOW3_BIND_UP) || bound(GOW3_BIND_LS_UP) ? -1
+               : code == SDL_SCANCODE_DOWN || code == SDL_SCANCODE_S || bound(GOW3_BIND_DOWN) || bound(GOW3_BIND_LS_DOWN)
+                   ? 1
+                   : 0;
+        if (!event.key.repeat) {
+            finish = code == SDL_SCANCODE_RETURN || code == SDL_SCANCODE_KP_ENTER || code == SDL_SCANCODE_SPACE ||
+                             bound(GOW3_BIND_CROSS)
+                         ? 1
+                     : code == SDL_SCANCODE_ESCAPE || code == SDL_SCANCODE_BACKSPACE || bound(GOW3_BIND_CIRCLE) ? 2
+                                                                                                             : 0;
+        }
+        break;
+    }
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
+        // The pad's buttons for Cross and Circle (GOW3_PAD_MAP), South and East unless remapped.
+        const Gow3GlyphState pad = Gow3Glyphs::State();
+        int accept = pad.pad[GOW3_GLYPH_CROSS], cancel = pad.pad[GOW3_GLYPH_CIRCLE];
+        if (accept < 0 || cancel < 0 || accept == cancel) {
+            accept = SDL_GAMEPAD_BUTTON_SOUTH;
+            cancel = SDL_GAMEPAD_BUTTON_EAST;
+        }
+        const int button = event.gbutton.button;
+        move = button == SDL_GAMEPAD_BUTTON_DPAD_UP ? -1 : button == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 0;
+        finish = button == accept ? 1 : button == cancel ? 2 : 0;
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        const bool click = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        const float density = PixelDensity(click ? event.button.windowID : event.motion.windowID);
+        const float x = (click ? event.button.x : event.motion.x) * density;
+        const float y = (click ? event.button.y : event.motion.y) * density;
+        ImGui::GetIO().AddMousePosEvent(x, y);
+        for (int i = 0; i < int(choice_rects.size()); ++i) {
+            const ImVec4& r = choice_rects[size_t(i)];
+            if (r.z > r.x && x >= r.x && x < r.z && y >= r.y && y < r.w) {
+                choice_index = i;
+                finish = click && event.button.button == SDL_BUTTON_LEFT ? 1 : 0;
+            }
+        }
+        if (!finish) {
+            return true;
+        }
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        move = event.wheel.y > 0 ? -1 : event.wheel.y < 0 ? 1 : 0;
+        break;
+    case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        return true;
+    default:
+        return false;
+    }
     if (move && count) {
         choice_index = (choice_index + move + count) % count;
     }
@@ -821,6 +941,17 @@ bool HandleEvent(const SDL_Event& event) {
     }
     if (choice_active && !menu_open) {
         return HandleChoiceEvent(event);
+    }
+    // The keyboard page on the game's Controller Layout screen takes the input; Insert and
+    // R3+L2 still open the settings menu over it.
+    if (!menu_open && Gow3Controls::Active()) {
+        const bool insert = event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_INSERT;
+        const bool combo = event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION ||
+                           ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) &&
+                            event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+        if (!insert && !combo) {
+            return Gow3Controls::HandleEvent(event);
+        }
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
@@ -953,7 +1084,7 @@ void SetLoading(bool active, u32 done, u32 total) {
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
-                           choice_retiring || s.show_fps || NoticeActive());
+                           choice_retiring || s.show_fps || NoticeActive() || Gow3Controls::Active());
 }
 
 void Notify(const std::string& text, int seconds) {
@@ -963,7 +1094,7 @@ void Notify(const std::string& text, int seconds) {
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active || choice_active;
+    return menu_open || text_entry_active || choice_active || Gow3Controls::Active();
 }
 
 void BeginChoice(const std::string& title, const std::vector<std::string>& items,
@@ -975,6 +1106,9 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
     choice_title = title;
     choice_items = items;
     choice_index = focus >= 0 && focus < int(items.size()) ? focus : 0;
+    choice_first = 0;
+    choice_rects.clear();
+    runtime_pad_bindings(&choice_bindings, 0);
     choice_result = -1;
     choice_active = true;
 }
@@ -999,6 +1133,12 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
     ConfirmRestart();
+    {
+        std::scoped_lock lock{imgui_mutex};
+        if (initialized) {
+            Gow3Controls::Frame(); // the game's Controller Layout screen: the keyboard page
+        }
+    }
     if (!Visible()) {
         return;
     }
@@ -1016,8 +1156,13 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
 
     UpdateChoiceTextures();
+    Gow3Ui::Update();
+    io.MouseDrawCursor = menu_open || Gow3Controls::Active() || (choice_active && !menu_open);
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    if (Gow3Controls::Active()) {
+        Gow3Controls::Draw(io.DisplaySize.x, io.DisplaySize.y);
+    }
     if (loading) {
         LoadingScreen();
     }

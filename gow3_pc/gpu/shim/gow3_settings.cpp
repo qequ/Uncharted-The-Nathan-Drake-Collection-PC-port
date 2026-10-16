@@ -2,12 +2,14 @@
 #include "gow3_settings.h"
 #include "gow3_orbs.h"
 #include "gow3_graphics.h"
+#include "../gow3gpu.h"
 
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -20,6 +22,23 @@ namespace {
 const char* Path() {
     const char* env = std::getenv("GOW3_CONFIG");
     return env && env[0] ? env : "gow3.ini";
+}
+
+// One whole line without its end (the key maps of the controls are longer than a buffer).
+bool ReadLine(FILE* file, std::string& text) {
+    text.clear();
+    char chunk[256];
+    while (std::fgets(chunk, sizeof(chunk), file)) {
+        text += chunk;
+        if (!text.empty() && text.back() == '\n') {
+            break;
+        }
+    }
+    if (text.empty()) {
+        return false;
+    }
+    text.erase(text.find_last_not_of(" \t\r\n") + 1);
+    return true;
 }
 
 float Clamp(float v, float lo, float hi) {
@@ -164,10 +183,8 @@ KeyValues synced;
 void Load() {
     auto& v = Get();
     if (FILE* file = std::fopen(Path(), "r")) {
-        char line[256];
-        while (std::fgets(line, sizeof(line), file)) {
-            std::string text{line};
-            text.erase(text.find_last_not_of(" \t\r\n") + 1);
+        std::string text;
+        while (ReadLine(file, text)) {
             const auto eq = text.find('=');
             if (text.empty() || text[0] == '#' || eq == std::string::npos) {
                 continue;
@@ -289,10 +306,8 @@ const std::string* Find(const KeyValues& values, const std::string& key) {
 KeyValues ReadFile() {
     KeyValues values;
     if (FILE* file = std::fopen(Path(), "r")) {
-        char line[256];
-        while (std::fgets(line, sizeof(line), file)) {
-            std::string text{line};
-            text.erase(text.find_last_not_of(" \t\r\n") + 1);
+        std::string text;
+        while (ReadLine(file, text)) {
             const auto eq = text.find('=');
             if (!text.empty() && text[0] != '#' && eq != std::string::npos) {
                 values.emplace_back(text.substr(0, eq), text.substr(eq + 1));
@@ -351,7 +366,40 @@ KeyValues Current() {
     return values;
 }
 
+namespace {
+std::mutex file_mutex; // Save and Store: the menu (present thread) and the pad's controls
+} // namespace
+
+void Store(const KeyValues& values) {
+    std::scoped_lock lock{file_mutex};
+    KeyValues lines = ReadFile();
+    for (const auto& [key, value] : values) {
+        bool found = false;
+        for (auto& line : lines) {
+            if (line.first == key) {
+                line.second = value;
+                found = true;
+            }
+        }
+        if (!found) {
+            lines.emplace_back(key, value);
+        }
+    }
+    std::string text = "# Uncharted settings (launcher and in-game menu: Insert / R3+L2)\n";
+    for (const auto& [key, value] : lines) {
+        text += key + "=" + value + "\n";
+    }
+    FILE* file = std::fopen(Path(), "w");
+    if (!file) {
+        std::printf("Settings: cannot write %s\n", Path());
+        return;
+    }
+    std::fputs(text.c_str(), file);
+    std::fclose(file);
+}
+
 void Save() {
+    std::scoped_lock lock{file_mutex};
     // Keys the in-game menu left alone since the game last read or wrote the file keep the
     // file's value: the launcher may have changed them while the game ran (it used to be
     // overwritten with the game's older value, e.g. a 165 FPS limit after choosing 60).
@@ -395,3 +443,11 @@ const char* UpscalerName(int upscaler) {
 }
 
 } // namespace Gow3Settings
+
+extern "C" void gow3gpu_settings_store(const char* const* keys, const char* const* values, int count) {
+    Gow3Settings::KeyValues lines;
+    for (int i = 0; i < count; ++i) {
+        lines.emplace_back(keys[i], values[i]);
+    }
+    Gow3Settings::Store(lines);
+}

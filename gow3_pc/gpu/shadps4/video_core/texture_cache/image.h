@@ -153,6 +153,9 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< gow3: SceneTargets holds a reduced-size proxy of it
+    /// gow3: the part of the games' button icon font this image holds, or the Controller Layout
+    /// picture (Gow3Glyphs::Role in gow3_glyphs.h); 0 for any other image.
+    u8 gow3_glyph = 0;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address
@@ -193,9 +196,6 @@ public:
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};
-    /// gow3: the part of the games' button icon font this image holds (Gow3Glyphs::Role in
-    /// gow3_glyphs.h), 0 for any other image.
-    u8 gow3_glyph{};
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

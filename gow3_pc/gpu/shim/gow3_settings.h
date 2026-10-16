@@ -131,6 +131,9 @@ using KeyValues = std::vector<std::pair<std::string, std::string>>;
 /// The current settings as file lines.
 KeyValues Current();
 void Save();
+/// Sets lines the menu does not keep itself (the keyboard and mouse controls of
+/// src/runtime_pad.c); the file's other lines stay as they are.
+void Store(const KeyValues& values);
 
 /// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);

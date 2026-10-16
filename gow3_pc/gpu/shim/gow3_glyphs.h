@@ -9,17 +9,25 @@
 // mouse buttons as bound, or an Xbox pad's buttons. src/runtime_pad.c says what the player last
 // used (gow3gpu_glyphs_set in gow3gpu.h); a worker thread redraws the atlas, and Generation()
 // changes so that the texture cache uploads it again.
+//
+// The same way, the picture of the games' Controller Layout screen (a DualShock 4 with its
+// buttons' actions, Options > Controls) is recognised (RoleLayout); the rasterizer reports each
+// draw that samples it (LayoutSeen), and the keyboard page (gow3_controls.h) covers that screen
+// while the player uses the keyboard.
 
 #include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "../gow3gpu.h"
+
 namespace Gow3Glyphs {
 
-/// Which part of the icon font a texture holds.
-enum Role : uint8_t { RoleNone = 0, RoleRgba, RoleColor, RoleAlpha };
+/// Which part of the icon font a texture holds, or the Controller Layout picture.
+enum Role : uint8_t { RoleNone = 0, RoleRgba, RoleColor, RoleAlpha, RoleLayout };
 
-/// A texture of the icon font's size and layout: 512x512 RGBA8, one level, 1D tiled.
+/// A texture of the icon font's size and layout (512x512 RGBA8, one level, 1D tiled), or of the
+/// Controller Layout picture's (2048x1024 RGBA8, 12 levels, 1D tiled).
 bool Candidate(uint32_t width, uint32_t height, bool rgba8, uint32_t levels, bool thin_1d);
 /// The role of a candidate texture's guest data (by its content), RoleNone for any other.
 Role Identify(const uint8_t* guest, uint32_t size);
@@ -27,5 +35,12 @@ Role Identify(const uint8_t* guest, uint32_t size);
 uint32_t Generation();
 /// Linear RGBA8 pixels to upload for the role, or null for the game's own icons.
 std::shared_ptr<const std::vector<uint8_t>> Pixels(Role role);
+
+/// A draw sampled the Controller Layout picture (any thread).
+void LayoutSeen();
+/// Milliseconds since a draw last sampled it (a large value when never).
+int64_t LayoutAge();
+/// What src/runtime_pad.c last sent: the device used last, the icon style, the bound keys.
+Gow3GlyphState State();
 
 } // namespace Gow3Glyphs

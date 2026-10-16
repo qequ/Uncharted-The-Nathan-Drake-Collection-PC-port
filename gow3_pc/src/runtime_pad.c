@@ -2,7 +2,10 @@
  * thread (gpu/shim/window.cpp); here state is only sampled.
  *
  * Default keyboard and mouse layout (GOW3_KEY_MAP / GOW3_MOUSE_MAP change it, see
- * apply_button_map; the launcher's Controls tab writes them):
+ * apply_button_map; the launcher's Controls tab writes them). The games' Controller Layout
+ * screen shows a keyboard page (gpu/shim/gow3_controls.cpp) that changes them in game; those are
+ * saved in the game's settings file (runtime_pad_set_bindings) and win at the next start unless
+ * the launcher's changed since:
  *   WASD left stick, mouse (or the arrow keys) right stick, right mouse L2 (aim), left mouse
  *   R2 (fire), Space Cross (jump), Left Ctrl Circle (cover, roll), F Square (melee),
  *   R Triangle (reload, pick up), Q / mouse X1 L1, E / mouse X2 R1, Left Shift L3,
@@ -190,6 +193,10 @@ static char *trim(char *text) {
  * skipped, so their button keeps its default. */
 enum { MAP_PAD, MAP_KEYBOARD, MAP_MOUSE };
 static int map_source(int kind, const char *name) {
+    if (kind==MAP_KEYBOARD && name[0]=='#') { /* a scancode number: keys whose name has a comma */
+        const int code=atoi(name+1);
+        return code>(int)SDL_SCANCODE_UNKNOWN && code<(int)SDL_SCANCODE_COUNT ? code : -1;
+    }
     if (kind==MAP_KEYBOARD) { int code=(int)SDL_GetScancodeFromName(name); return code>(int)SDL_SCANCODE_UNKNOWN ? code : -1; }
     if (kind==MAP_MOUSE) {
         for (size_t i=0;i<sizeof(mouse_names)/sizeof(*mouse_names);++i) if (!SDL_strcasecmp(name,mouse_names[i])) return (int)i+1;
@@ -254,15 +261,76 @@ static int apply_button_map(ButtonMap *map, const char *spec, int kind) {
     return used;
 }
 
+/* The built-in layout (Reset Defaults on the keyboard page), and the mouse look and button icon
+ * options, which the keyboard page changes too. glyph_mode: 0 icons follow the device used last,
+ * 1 keyboard, 2 Xbox, 3 PlayStation (the games' own). */
+static ButtonMap key_default, mouse_default;
+static StickKeyMap stick_default;
+static float mouse_sensitivity=1.0f;
+static int mouse_invert, glyph_mode;
+static const char *const glyph_mode_names[]={"auto","keyboard","xbox","playstation"};
+
+/* A line of the game's settings file (GOW3_CONFIG), where the keyboard page saves its controls;
+ * 0 when the file has none. */
+static int settings_value(const char *key, char *out, size_t size) {
+    const char *path=getenv("GOW3_CONFIG");
+    FILE *f=fopen(path && *path ? path : "gow3.ini","r");
+    if (!f) return 0;
+    char line[4096];
+    const size_t length=strlen(key);
+    int found=0;
+    while (fgets(line,sizeof(line),f))
+        if (!strncmp(line,key,length) && line[length]=='=') { snprintf(out,size,"%s",trim(line+length+1)); found=1; }
+    fclose(f);
+    return found;
+}
+/* The launcher's controls as this start received them: saved with the keyboard page's controls,
+ * which then win until the launcher passes different ones (the newer change wins). */
+static void launcher_stamp(char *out, size_t size) {
+    static const char *const names[]={"GOW3_KEY_MAP","GOW3_MOUSE_MAP","GOW3_MOUSE_SENS","GOW3_MOUSE_INVERT"};
+    uint64_t hash=1469598103934665603ull;
+    for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) {
+        const char *value=getenv(names[i]);
+        for (const char *p=value ? value : "";*p;++p) hash=(hash^(uint8_t)*p)*1099511628211ull;
+        hash=(hash^0xffu)*1099511628211ull;
+    }
+    snprintf(out,size,"%016llx",(unsigned long long)hash);
+}
+static int glyph_mode_of(const char *name) {
+    for (int i=0;i<4;++i) if (name && !SDL_strcasecmp(name,glyph_mode_names[i])) return i;
+    return 0;
+}
+
 static void load_button_maps(void) {
     static bool loaded;
     if (loaded) return;
     loaded=true;
+    key_default=key_map; mouse_default=mouse_map; stick_default=stick_keys;
     const int pad=apply_button_map(&pad_map,getenv("GOW3_PAD_MAP"),MAP_PAD);
-    const int keys=apply_button_map(&key_map,getenv("GOW3_KEY_MAP"),MAP_KEYBOARD);
-    const int mouse=apply_button_map(&mouse_map,getenv("GOW3_MOUSE_MAP"),MAP_MOUSE);
+    const char *keys_spec=getenv("GOW3_KEY_MAP"), *mouse_spec=getenv("GOW3_MOUSE_MAP");
+    const char *sens=getenv("GOW3_MOUSE_SENS"), *invert=getenv("GOW3_MOUSE_INVERT");
+    static char saved_keys[2048], saved_mouse[1024], saved_sens[32], saved_invert[8], saved_glyphs[32];
+    char stamp[32], saved_stamp[32];
+    launcher_stamp(stamp,sizeof(stamp));
+    const int saved=settings_value("key_map",saved_keys,sizeof(saved_keys)) &&
+                    settings_value("launcher_controls",saved_stamp,sizeof(saved_stamp)) && !strcmp(saved_stamp,stamp);
+    if (saved) {
+        keys_spec=saved_keys;
+        if (settings_value("mouse_map",saved_mouse,sizeof(saved_mouse))) mouse_spec=saved_mouse;
+        if (settings_value("mouse_sens",saved_sens,sizeof(saved_sens))) sens=saved_sens;
+        if (settings_value("mouse_invert",saved_invert,sizeof(saved_invert))) invert=saved_invert;
+    }
+    const int keys=apply_button_map(&key_map,keys_spec,MAP_KEYBOARD);
+    const int mouse=apply_button_map(&mouse_map,mouse_spec,MAP_MOUSE);
+    if (sens && atof(sens)>0) mouse_sensitivity=(float)atof(sens);
+    mouse_invert=invert && invert[0]=='1';
+    /* GOW3_GLYPHS (tests) wins over the keyboard page's choice. */
+    const char *glyphs=getenv("GOW3_GLYPHS");
+    if (!glyphs || !*glyphs) glyphs=settings_value("glyphs",saved_glyphs,sizeof(saved_glyphs)) ? saved_glyphs : NULL;
+    glyph_mode=glyph_mode_of(glyphs);
     if (pad || keys || mouse)
-        printf("Runtime: pad map: %d gamepad, %d keyboard and %d mouse entries\n",pad,keys,mouse);
+        printf("Runtime: pad map: %d gamepad, %d keyboard and %d mouse entries%s\n",pad,keys,mouse,
+               saved ? " (the controls saved in game)" : "");
 }
 
 static void key_axis(uint8_t *axis, bool negative, bool positive) {
@@ -273,12 +341,9 @@ static void key_axis(uint8_t *axis, bool negative, bool positive) {
  * zone so slow movements turn the camera too, and lets go when the mouse rests. Returns 1 when
  * the player used the mouse (a button, or a real movement). */
 static int sample_mouse(PadData *d) {
-    static int enabled=-1; static float sensitivity=1.0f, invert=1.0f;
-    if (enabled<0) {
-        const char *env=getenv("GOW3_MOUSE"); enabled=!(env && env[0]=='0');
-        const char *sens=getenv("GOW3_MOUSE_SENS"); if (sens && atof(sens)>0) sensitivity=(float)atof(sens);
-        const char *inv=getenv("GOW3_MOUSE_INVERT"); if (inv && inv[0]=='1') invert=-1.0f;
-    }
+    static int enabled=-1;
+    if (enabled<0) { const char *env=getenv("GOW3_MOUSE"); enabled=!(env && env[0]=='0'); }
+    const float sensitivity=mouse_sensitivity, invert=mouse_invert ? -1.0f : 1.0f;
     if (!enabled) return 0;
     float dx=0, dy=0; unsigned held=0;
     const int captured=gow3gpu_mouse_take(&dx,&dy,&held);
@@ -307,8 +372,9 @@ static int sample_mouse(PadData *d) {
 }
 
 /* Button icons in the games' text (gow3gpu_glyphs_set): the device the player used last and what
- * presses each PS4 button. GOW3_GLYPHS: auto (default: the keyboard and mouse or the gamepad,
- * whichever was used last), keyboard, xbox, or playstation (the games' own icons always). */
+ * presses each PS4 button. glyph_mode (GOW3_GLYPHS, or the keyboard page): auto (default: the
+ * keyboard and mouse or the gamepad, whichever was used last), keyboard, xbox, or playstation
+ * (the games' own icons always). */
 static int glyph_style_of(SDL_Gamepad *g) {
     switch (SDL_GetGamepadType(g)) {
     case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: return GOW3_GLYPHS_PLAYSTATION;
@@ -326,12 +392,8 @@ static char face_letter(SDL_Gamepad *g, SDL_GamepadButton button) {
     }
 }
 static void update_glyphs(SDL_Gamepad *g, int pad_used, int keys_used) {
-    static int mode=-1, last_device=-1; /* last_device: 0 keyboard and mouse, 1 gamepad */
-    if (mode<0) {
-        const char *env=getenv("GOW3_GLYPHS");
-        mode=!env || !*env || !SDL_strcasecmp(env,"auto") ? 0 : !SDL_strcasecmp(env,"keyboard") ? 1
-            : !SDL_strcasecmp(env,"xbox") ? 2 : 3;
-    }
+    static int last_device=-1; /* 0 keyboard and mouse, 1 gamepad */
+    const int mode=glyph_mode;
     if (pad_used) last_device=1;
     else if (keys_used) last_device=0;
     else if (last_device<0) last_device=g!=NULL;
@@ -339,6 +401,7 @@ static void update_glyphs(SDL_Gamepad *g, int pad_used, int keys_used) {
     memset(&s,0,sizeof(s));
     s.style=mode==1 ? GOW3_GLYPHS_KEYBOARD : mode==2 ? GOW3_GLYPHS_XBOX : mode==3 ? GOW3_GLYPHS_PLAYSTATION
         : last_device==1 && g ? glyph_style_of(g) : GOW3_GLYPHS_KEYBOARD;
+    s.keyboard_last=last_device==0 || !g;
     /* The PS4 button of each GOW3_GLYPH_* up to the d-pad; the touchpad is either side's click. */
     static const uint32_t ps[]={BTN_CROSS,BTN_CIRCLE,BTN_SQUARE,BTN_TRIANGLE,BTN_L1,BTN_R1,BTN_L2,BTN_R2,
         BTN_L3,BTN_R3,BTN_OPTIONS,CLICK_LEFT|CLICK_RIGHT|BTN_TOUCHPAD,BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT};
@@ -547,6 +610,10 @@ static void mark_key(void) {
 /* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
  * name) stay hidden until released: the game would take them as a new press. */
 static int hold_after_capture;
+/* A press the keyboard page sends to the game as it closes (runtime_pad_press), held PRESS_US. */
+enum { PRESS_US=150000 };
+static uint32_t pressed;
+static uint64_t pressed_at;
 static void sample(PadData *d) {
     sample_host(d);
     mark_key();
@@ -565,6 +632,119 @@ static void sample(PadData *d) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;
     }
+    if (pressed) {
+        if (now_us()-pressed_at<PRESS_US) d->buttons|=pressed;
+        else pressed=0;
+    }
+}
+
+/* The keyboard page (gow3gpu.h): a row per PS4 button and stick direction. */
+static const uint32_t bind_ps[GOW3_BIND_LS_UP]={BTN_CROSS,BTN_CIRCLE,BTN_SQUARE,BTN_TRIANGLE,BTN_L1,BTN_R1,
+    BTN_L2,BTN_R2,BTN_L3,BTN_R3,BTN_OPTIONS,CLICK_LEFT,CLICK_RIGHT,BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT};
+static const char *const bind_names[GOW3_BIND_COUNT]={"cross","circle","square","triangle","l1","r1","l2","r2",
+    "l3","r3","options","touchpad_left","touchpad_right","up","down","left","right",
+    "ls_up","ls_down","ls_left","ls_right","rs_up","rs_down","rs_left","rs_right"};
+_Static_assert(GOW3_BIND_RS_RIGHT-GOW3_BIND_LS_UP==RS_RIGHT,"stick rows follow the stick key directions");
+
+static void bindings_of(Gow3Bindings *b, const ButtonMap *keys, const ButtonMap *mouse, const StickKeyMap *sticks) {
+    memset(b,0,sizeof(*b));
+    for (int row=0;row<GOW3_BIND_COUNT;++row) {
+        int n=0;
+        if (row<GOW3_BIND_LS_UP) {
+            for (size_t i=0;i<keys->count && n<GOW3_BIND_KEYS;++i) if (keys->entries[i].ps==bind_ps[row]) b->key[row][n++]=keys->entries[i].source;
+            for (size_t i=0;i<mouse->count && !b->mouse[row];++i) if (mouse->entries[i].ps==bind_ps[row]) b->mouse[row]=mouse->entries[i].source;
+        } else {
+            for (size_t i=0;i<sticks->count && n<GOW3_BIND_KEYS;++i)
+                if (sticks->entries[i].direction==row-GOW3_BIND_LS_UP) b->key[row][n++]=sticks->entries[i].source;
+        }
+    }
+}
+/* Called under lock. */
+static void set_maps(const Gow3Bindings *b) {
+    key_map.count=mouse_map.count=stick_keys.count=0;
+    for (int row=0;row<GOW3_BIND_COUNT;++row)
+        for (int k=0;k<GOW3_BIND_KEYS;++k) {
+            const int source=b->key[row][k];
+            if (source<=(int)SDL_SCANCODE_UNKNOWN || source>=(int)SDL_SCANCODE_COUNT) continue;
+            if (row<GOW3_BIND_LS_UP) key_map.entries[key_map.count++]=(ButtonSource){source,bind_ps[row]};
+            else {
+                stick_keys.entries[stick_keys.count].source=source;
+                stick_keys.entries[stick_keys.count++].direction=row-GOW3_BIND_LS_UP;
+            }
+        }
+    for (int row=0;row<GOW3_BIND_LS_UP;++row)
+        if (b->mouse[row]>=MOUSE_LEFT && b->mouse[row]<=MOUSE_WHEEL_DOWN) mouse_map.entries[mouse_map.count++]=(ButtonSource){b->mouse[row],bind_ps[row]};
+}
+static void append(char *out, size_t size, size_t *length, const char *text) {
+    const int n=snprintf(out+*length,size-*length,"%s",text);
+    if (n>0) *length+=(size_t)n<size-*length ? (size_t)n : size-*length-1;
+}
+/* GOW3_KEY_MAP / GOW3_MOUSE_MAP texts with every row (an unbound one stays unbound). */
+static void bindings_spec(const Gow3Bindings *b, char *keys, size_t keys_size, char *mouse, size_t mouse_size) {
+    size_t kl=0, ml=0;
+    keys[0]=mouse[0]=0;
+    for (int row=0;row<GOW3_BIND_COUNT;++row) {
+        int any=0;
+        for (int k=0;k<GOW3_BIND_KEYS;++k) {
+            const int code=b->key[row][k];
+            if (code<=(int)SDL_SCANCODE_UNKNOWN || code>=(int)SDL_SCANCODE_COUNT) continue;
+            const char *name=SDL_GetScancodeName((SDL_Scancode)code);
+            char entry[96];
+            if (!name || !*name || strchr(name,',')) snprintf(entry,sizeof(entry),"%s%s=#%d",kl ? "," : "",bind_names[row],code);
+            else snprintf(entry,sizeof(entry),"%s%s=%s",kl ? "," : "",bind_names[row],name);
+            append(keys,keys_size,&kl,entry);
+            any=1;
+        }
+        if (!any) { char entry[64]; snprintf(entry,sizeof(entry),"%s%s=",kl ? "," : "",bind_names[row]); append(keys,keys_size,&kl,entry); }
+        if (row<GOW3_BIND_LS_UP) {
+            const int m=b->mouse[row];
+            char entry[64];
+            snprintf(entry,sizeof(entry),"%s%s=%s",ml ? "," : "",bind_names[row],
+                     m>=MOUSE_LEFT && m<=MOUSE_WHEEL_DOWN ? mouse_names[m-1] : "");
+            append(mouse,mouse_size,&ml,entry);
+        }
+    }
+}
+
+void runtime_pad_bindings(Gow3Bindings *out, int defaults) {
+    pthread_mutex_lock(&lock);
+    load_button_maps();
+    if (defaults) {
+        bindings_of(out,&key_default,&mouse_default,&stick_default);
+        out->mouse_sensitivity=1.0f;
+    } else {
+        bindings_of(out,&key_map,&mouse_map,&stick_keys);
+        out->mouse_sensitivity=mouse_sensitivity;
+        out->mouse_invert=mouse_invert;
+        out->glyphs=glyph_mode;
+    }
+    pthread_mutex_unlock(&lock);
+}
+void runtime_pad_set_bindings(const Gow3Bindings *b) {
+    char keys[2048], mouse[1024], sens[32], invert[8], stamp[32];
+    pthread_mutex_lock(&lock);
+    load_button_maps();
+    set_maps(b);
+    mouse_sensitivity=b->mouse_sensitivity>=0.05f && b->mouse_sensitivity<=20.0f ? b->mouse_sensitivity : 1.0f;
+    mouse_invert=b->mouse_invert!=0;
+    glyph_mode=b->glyphs>=0 && b->glyphs<4 ? b->glyphs : 0;
+    snprintf(sens,sizeof(sens),"%.2f",mouse_sensitivity);
+    snprintf(invert,sizeof(invert),"%d",mouse_invert);
+    const char *glyphs=glyph_mode_names[glyph_mode];
+    pthread_mutex_unlock(&lock);
+    bindings_spec(b,keys,sizeof(keys),mouse,sizeof(mouse));
+    launcher_stamp(stamp,sizeof(stamp));
+    const char *const names[]={"key_map","mouse_map","mouse_sens","mouse_invert","glyphs","launcher_controls"};
+    const char *const values[]={keys,mouse,sens,invert,glyphs,stamp};
+    gow3gpu_settings_store(names,values,(int)(sizeof(names)/sizeof(*names)));
+    puts("Runtime: controls changed in game (saved in the game's settings file)");
+}
+void runtime_pad_press(int bind) {
+    if (bind<0 || bind>=GOW3_BIND_LS_UP) return;
+    pthread_mutex_lock(&lock);
+    pressed=bind_ps[bind];
+    pressed_at=now_us();
+    pthread_mutex_unlock(&lock);
 }
 
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }

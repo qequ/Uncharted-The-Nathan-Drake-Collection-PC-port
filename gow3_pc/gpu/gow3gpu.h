@@ -2,6 +2,7 @@
  * GnmDriver, VideoOut and kernel event queues, adapted to the native loader. */
 #ifndef GOW3GPU_H
 #define GOW3GPU_H
+#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +64,7 @@ enum {
 enum { GOW3_GLYPH_PAD_LEFT_TRIGGER = 100, GOW3_GLYPH_PAD_RIGHT_TRIGGER };
 typedef struct {
     int32_t style;                   /* GOW3_GLYPHS_* */
+    int32_t keyboard_last;           /* 1: the keyboard or mouse was used last (not a gamepad) */
     int32_t key[GOW3_GLYPH_COUNT];   /* the first key that presses it (SDL scancode), 0: none */
     int32_t mouse[GOW3_GLYPH_COUNT]; /* the first mouse source: 1 left, 2 middle, 3 right, 4 X1,
                                         5 X2, 6 wheel up, 7 wheel down; 0: none */
@@ -71,6 +73,39 @@ typedef struct {
     char face[4];                    /* the pad's letters at south, east, west, north */
 } Gow3GlyphState;
 void gow3gpu_glyphs_set(const Gow3GlyphState *state);
+/* Keyboard and mouse controls, changed in game on the games' Controller Layout screen
+ * (gpu/shim/gow3_controls.cpp) and kept by src/runtime_pad.c: a row per PS4 button or stick
+ * direction, with up to two keys and one mouse source. */
+enum {
+    GOW3_BIND_CROSS, GOW3_BIND_CIRCLE, GOW3_BIND_SQUARE, GOW3_BIND_TRIANGLE,
+    GOW3_BIND_L1, GOW3_BIND_R1, GOW3_BIND_L2, GOW3_BIND_R2, GOW3_BIND_L3, GOW3_BIND_R3,
+    GOW3_BIND_OPTIONS, GOW3_BIND_TOUCHPAD_LEFT, GOW3_BIND_TOUCHPAD_RIGHT,
+    GOW3_BIND_UP, GOW3_BIND_DOWN, GOW3_BIND_LEFT, GOW3_BIND_RIGHT,
+    GOW3_BIND_LS_UP, GOW3_BIND_LS_DOWN, GOW3_BIND_LS_LEFT, GOW3_BIND_LS_RIGHT,
+    GOW3_BIND_RS_UP, GOW3_BIND_RS_DOWN, GOW3_BIND_RS_LEFT, GOW3_BIND_RS_RIGHT,
+    GOW3_BIND_COUNT
+};
+enum { GOW3_BIND_KEYS = 2 };
+typedef struct {
+    int32_t key[GOW3_BIND_COUNT][GOW3_BIND_KEYS]; /* SDL scancodes, 0: none */
+    int32_t mouse[GOW3_BIND_COUNT];  /* a mouse source as in Gow3GlyphState (stick rows: none) */
+    float mouse_sensitivity;         /* mouse look speed, 1 = default */
+    int32_t mouse_invert;            /* 1: moving the mouse up looks down */
+    int32_t glyphs;                  /* button icons: 0 follow the device, 1 keyboard, 2 Xbox,
+                                        3 PlayStation (the games' own) */
+} Gow3Bindings;
+/* Implemented by src/runtime_pad.c. The current controls (defaults: 1 for the built-in ones). */
+void runtime_pad_bindings(Gow3Bindings *out, int defaults);
+/* Applies new controls at once and saves them in the game's settings file. */
+void runtime_pad_set_bindings(const Gow3Bindings *bindings);
+/* The game sees the PS4 button of a GOW3_BIND_* row pressed for a moment (the keyboard page
+ * closing the game's screen under it). */
+void runtime_pad_press(int bind);
+/* Writes key=value lines into the game's settings file (GOW3_CONFIG), keeping its other lines. */
+void gow3gpu_settings_store(const char *const *keys, const char *const *values, int count);
+/* Implemented by src/runtime_file.c: the host path of a guest path such as /app0/u3data/data.psarc
+ * (0, or an errno). The keyboard page reads the game's menu font from its archive. */
+int runtime_file_host_path(const char *guest, char *out, size_t size);
 #ifdef __cplusplus
 }
 #endif
