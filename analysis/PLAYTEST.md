@@ -84,18 +84,20 @@ to go back. Useful ones:
 
 | Setting | |
 |---|---|
-| `GOW3_ASYNC_READBACK=0` | GPU readbacks: the CPU waits for them. **Uncharted 3's default**: the fast mode crashed it in the London pub fight. |
-| `GOW3_ASYNC_READBACK=1` | readbacks in the background, pages read-protected until they arrive (not yet tested in Uncharted 3) |
-| `GOW3_ASYNC_READBACK=2` | readbacks in the background, unprotected: the default of Uncharted 1 and 2 |
+| `GOW3_ASYNC_READBACK=0` | GPU readbacks: the CPU waits for them (correct, slower) |
+| `GOW3_ASYNC_READBACK=1` | readbacks in the background, pages read-protected until they arrive: **the default of Uncharted 2 and 3** since 0.1.2 |
+| `GOW3_ASYNC_READBACK=2` | readbacks in the background, unprotected: the default of Uncharted 1. It crashed Uncharted 3 (pub fight, Cartagena museum) |
 | `GOW3_FREEZE_SECONDS=30` | how long without a new frame counts as a freeze (0: no freeze reports) |
 | `GOW3_MARK_KEY=F7` | another mark key (an SDL key name; `off` turns it off) |
 | `GOW3_MINIDUMP=0` | no minidump with crash reports |
 
-## Known problems (16 October 2026)
+## Known problems (16 October 2026, version 0.1.2)
 
 - Each game first says "Friend Stats are not available when offline": expected, there is no PSN.
-- Uncharted 2's heaviest scenes run at 40-45 FPS; multithreaded rendering with 2 frames queued can
-  end Uncharted 2 with the game assert `m_gfxEopTick` (leave multithreaded rendering off).
+- Uncharted 2's heaviest scenes run at about 50 FPS. Keep "Frames queued" at 1: with 2, GPU results
+  reach the game a frame late and Uncharted 2's NPCs float. Multithreaded rendering is still
+  experimental.
+- Uncharted 3: Sully's shirt in the bar can flicker at 60 FPS (not at 30).
 - Uncharted 1 renders at most 2880x1620 and upscales above that.
 - Uncharted 3 has been played the least. The full list: [ROADMAP.md](ROADMAP.md) and
   [STATUS.md](STATUS.md).
