@@ -7,6 +7,8 @@
 /analysis/*
 !/analysis/STATUS.md
 !/analysis/PLAN.md
+!/analysis/ROADMAP.md
+!/analysis/PLAYTEST.md
 /gow3_pc/out/
 /Uncharted.lnk
 __pycache__/
