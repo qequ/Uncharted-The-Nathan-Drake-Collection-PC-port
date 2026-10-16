@@ -142,17 +142,132 @@ static int read_memory(uintptr_t address, void *out, size_t size) {
     SIZE_T done=0;
     return address && ReadProcessMemory(GetCurrentProcess(),(LPCVOID)address,out,size,&done) && done==size;
 }
-/* Innermost first: host frames by their unwind tables, guest code by its saved frame pointers. */
+/* Host stacks are unwound here from the modules' unwind tables (.pdata), without
+ * RtlLookupFunctionEntry and RtlVirtualUnwind (a C port of gow3_profiler.cpp's unwinder, which
+ * met both problems on 16 Oct): the first takes the function table lock, and a thread suspended
+ * while it held it (dispatching an exception, e.g. a guest page fault) hung the report and the
+ * game; the second reads the stack unchecked, and a garbage frame register faulted. */
+/* The unwind entry for `rip` (copied to `entry`); image_base is set when rip is in a module.
+ * The module comes from VirtualQuery: guest code is not an image mapping. */
+static int lookup_function(uint64_t rip, uint64_t *image_base, RUNTIME_FUNCTION *entry) {
+    MEMORY_BASIC_INFORMATION region;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nt;
+    *image_base=0;
+    if (!VirtualQuery((LPCVOID)(uintptr_t)rip,&region,sizeof(region)) || region.Type!=MEM_IMAGE) return 0;
+    const uint64_t base=(uintptr_t)region.AllocationBase;
+    if (!read_memory(base,&dos,sizeof(dos)) || dos.e_magic!=IMAGE_DOS_SIGNATURE ||
+        !read_memory(base+(uint32_t)dos.e_lfanew,&nt,sizeof(nt)) || nt.Signature!=IMAGE_NT_SIGNATURE ||
+        nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
+    const uint64_t end=base+nt.OptionalHeader.SizeOfImage;
+    if (rip>=end) return 0;
+    *image_base=base;
+    const IMAGE_DATA_DIRECTORY *table=&nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    const DWORD offset=(DWORD)(rip-base);
+    DWORD lo=0, hi=table->Size/sizeof(RUNTIME_FUNCTION);
+    while (lo<hi) {
+        const DWORD mid=(lo+hi)/2;
+        if (!read_memory(base+table->VirtualAddress+mid*sizeof(RUNTIME_FUNCTION),entry,sizeof(*entry))) return 0;
+        if (offset<entry->BeginAddress) hi=mid;
+        else if (offset>=entry->EndAddress) lo=mid+1;
+        else {
+            /* An indirect entry (low bit set) names the entry that holds the unwind data. */
+            if (entry->UnwindData&1) {
+                const uint64_t target=base+(entry->UnwindData&~(DWORD)1);
+                if (target+sizeof(*entry)>end || !read_memory(target,entry,sizeof(*entry))) return 0;
+            }
+            unsigned char header=0;
+            const uint64_t info=base+entry->UnwindData;
+            return info+4<=end && read_memory(info,&header,1) && (header&7)>=1 && (header&7)<=2;
+        }
+    }
+    return 0;
+}
+/* Slots an unwind code takes (the code and its data). */
+static unsigned code_slots(uint16_t code, unsigned version) {
+    const unsigned op=(code>>8)&15, op_info=code>>12;
+    if (op==1) return op_info==0 ? 2 : 3;
+    if (op==4 || op==8) return 2;
+    if (op==5 || op==9) return 3;
+    if (op==6) return version==2 ? 1 : 2; /* v2: an epilogue descriptor */
+    return 1;
+}
+/* One x64 unwind step from the function's unwind codes, every stack read checked. Epilogues are
+ * not detected: a thread stopped in one may unwind wrongly and its stack ends early. 0: stop. */
+static int unwind_step(RUNTIME_FUNCTION function, uint64_t image_base, CONTEXT *context) {
+    /* Register numbers of the unwind codes: rax rcx rdx rbx rsp rbp rsi rdi r8-r15. */
+    DWORD64 *regs[16]={&context->Rax,&context->Rcx,&context->Rdx,&context->Rbx,&context->Rsp,&context->Rbp,
+                       &context->Rsi,&context->Rdi,&context->R8,&context->R9,&context->R10,&context->R11,
+                       &context->R12,&context->R13,&context->R14,&context->R15};
+    const uint64_t offset=context->Rip-image_base-function.BeginAddress;
+    for (int chain=0;chain<8;++chain) {
+        const uint64_t info=image_base+function.UnwindData;
+        unsigned char header[4];
+        uint16_t codes[256];
+        if (!read_memory(info,header,sizeof(header))) return 0;
+        const unsigned version=header[0]&7, flags=header[0]>>3, count=header[2];
+        const unsigned frame_reg=header[3]&15, frame_offset=header[3]>>4;
+        const unsigned slots=(count+1)&~1u; /* padded to an even count before a chained entry */
+        if (version==0 || version>2 || (slots && !read_memory(info+4,codes,slots*sizeof(*codes)))) return 0;
+        /* Saves count from the fixed allocation: the frame register's base once the prologue has
+         * set it, else RSP (as RtlVirtualUnwind does). */
+        uint64_t frame=context->Rsp;
+        for (unsigned i=0;frame_reg && i<count;i+=code_slots(codes[i],version))
+            if (((codes[i]>>8)&15)==3 && (chain || offset>=(codes[i]&0xffu))) { frame=*regs[frame_reg]-frame_offset*16ull; break; }
+        for (unsigned i=0;i<count;) {
+            const unsigned code_offset=codes[i]&0xff, op=(codes[i]>>8)&15, op_info=codes[i]>>12;
+            const unsigned used=code_slots(codes[i],version);
+            if (i+used>count) return 0;
+            /* Prologue operations not yet run at this offset are skipped (primary entry only). */
+            if (chain || op==6 || offset>=code_offset) {
+                switch (op) {
+                case 0: /* UWOP_PUSH_NONVOL */
+                    if (!read_memory(context->Rsp,regs[op_info],8)) return 0;
+                    context->Rsp+=8;
+                    break;
+                case 1: /* UWOP_ALLOC_LARGE */
+                    context->Rsp+=op_info==0 ? codes[i+1]*8u : (codes[i+1]|((uint32_t)codes[i+2]<<16));
+                    break;
+                case 2: context->Rsp+=op_info*8+8; break; /* UWOP_ALLOC_SMALL */
+                case 3: context->Rsp=frame; break;        /* UWOP_SET_FPREG */
+                case 4: /* UWOP_SAVE_NONVOL */
+                    if (!read_memory(frame+codes[i+1]*8ull,regs[op_info],8)) return 0;
+                    break;
+                case 5: /* UWOP_SAVE_NONVOL_FAR */
+                    if (!read_memory(frame+(codes[i+1]|((uint32_t)codes[i+2]<<16)),regs[op_info],8)) return 0;
+                    break;
+                case 10: { /* UWOP_PUSH_MACHFRAME: the interrupted frame (rip, cs, eflags, rsp, ss) */
+                    const uint64_t machine=context->Rsp+(op_info ? 8 : 0);
+                    uint64_t rip=0, rsp=0;
+                    if (!read_memory(machine,&rip,8) || !read_memory(machine+24,&rsp,8)) return 0;
+                    context->Rip=rip; context->Rsp=rsp;
+                    return 1;
+                }
+                default: break; /* xmm saves, epilogue descriptors */
+                }
+            }
+            i+=used;
+        }
+        if (!(flags&UNW_FLAG_CHAININFO)) break;
+        /* The chained entry follows the (padded) codes. */
+        if (!read_memory(info+4+slots*sizeof(*codes),&function,sizeof(function))) return 0;
+    }
+    uint64_t ret=0;
+    if (!read_memory(context->Rsp,&ret,sizeof(ret))) return 0;
+    context->Rip=ret; context->Rsp+=8;
+    return 1;
+}
+/* Innermost first: host frames by their unwind tables, guest code by its saved frame pointers.
+ * No allocation and no locks: the thread may be suspended holding the heap or loader locks. */
 static int walk(CONTEXT context, uint64_t *pcs, int max) {
     const uint64_t low=context.Rsp, high=context.Rsp+(8ull<<20);
     int depth=0;
     while (depth<max && context.Rip) {
         pcs[depth++]=context.Rip;
-        DWORD64 image_base=0;
-        PRUNTIME_FUNCTION function=RtlLookupFunctionEntry(context.Rip,&image_base,NULL);
-        if (function) {
-            void *handler_data=NULL; DWORD64 establisher=0;
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER,image_base,context.Rip,function,&context,&handler_data,&establisher,NULL);
+        uint64_t image_base=0;
+        RUNTIME_FUNCTION function;
+        if (lookup_function(context.Rip,&image_base,&function)) {
+            if (!unwind_step(function,image_base,&context)) break;
         } else if (image_base) { /* a leaf function: the return address is on top of the stack */
             uint64_t ret=0;
             if (!read_memory(context.Rsp,&ret,sizeof(ret))) break;

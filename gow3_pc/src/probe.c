@@ -156,6 +156,8 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     if (gpu_enabled) gow3gpu_dump_guest_writes(info);
+    /* The report first: a fault while unwinding below would end the process before it. */
+    runtime_report_crash(info,NULL); /* analysis/reports: what the game was doing, and a minidump */
     /* Host code: unwound with the executable's unwind tables (optimized host code keeps no frame
      * pointers); stops at guest code, which has none. */
     {
@@ -189,7 +191,6 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         rbp=frame[0];
     }
     fflush(NULL);
-    runtime_report_crash(info,NULL); /* analysis/reports: what the game was doing, and a minidump */
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
