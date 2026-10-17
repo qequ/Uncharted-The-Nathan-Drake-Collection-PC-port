@@ -22,7 +22,13 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox
 
-from PIL import Image, ImageDraw, ImageTk
+try:
+    from PIL import Image, ImageDraw, ImageTk
+except ImportError:
+    # pythonw has no console: say what is missing instead of showing nothing.
+    ctypes.windll.user32.MessageBoxW(None, "The launcher needs Pillow. In a terminal run:\n\n"
+                                           "py -m pip install pillow", "Uncharted launcher", 0x10)
+    raise
 
 import updater  # launcher/updater.py: updates from the GitHub releases
 
@@ -1655,8 +1661,28 @@ def main():
         pass
     root = tk.Tk()
     Launcher(root)
+    # Started through another program (the Python launcher pyw, a shortcut), Windows may open the
+    # window behind the one in front, so the launcher seemed not to start: raise it once.
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(500, lambda: root.attributes("-topmost", False))
+    root.focus_force()
     root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # pythonw has no console: a failed start would otherwise show nothing at all.
+        import traceback
+        details = traceback.format_exc()
+        log = CONFIG_FILE.with_name("launcher-error.log")
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(details, encoding="utf-8")
+        except OSError:
+            pass
+        ctypes.windll.user32.MessageBoxW(None, f"The launcher could not start.\n\n{details[-1500:]}\n"
+                                               f"Saved in {log}", APP_TITLE, 0x10)
+        raise
