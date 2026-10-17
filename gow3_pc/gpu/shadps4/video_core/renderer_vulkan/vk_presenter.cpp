@@ -545,8 +545,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
         image_view = *image.FindView(view_info).image_view;
         image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
+        // gow3 17 Oct: the FSR pass (RCAS when the window has the image's size, FSR 1 when it is
+        // larger) reads the display buffer in a compute shader. With a barrier for fragment
+        // shaders alone it read the frame before the game's last draws had landed: in fullscreen
+        // at 1080p with sharpening on (the default), logos, menu text and chapter titles came out
+        // with tile-shaped holes or not at all (13 of 20 frames of Uncharted 2's title screen on
+        // an AMD RX 9060 XT). The compute stage also makes the game's next writes wait for it.
         runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eFragmentShader,
+                        vk::PipelineStageFlagBits2::eFragmentShader |
+                            vk::PipelineStageFlagBits2::eComputeShader,
                         vk::AccessFlagBits2::eShaderRead);
         runtime.FlushBarriers();
     }
