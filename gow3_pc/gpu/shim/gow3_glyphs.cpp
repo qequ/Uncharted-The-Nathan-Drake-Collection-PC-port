@@ -3,6 +3,8 @@
 
 #include "gow3_glyphs.h"
 #include "../gow3gpu.h"
+#include "gow3_bc.h"
+#include "gow3_pak.h"
 
 #include <SDL3/SDL.h>
 #include <xxhash.h>
@@ -17,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -700,7 +703,15 @@ void Store(const Canvas& c, std::vector<uint8_t>& atlas, int x0, int y0) {
 }
 
 using Originals = std::array<std::vector<uint8_t>, 4>;
-using Published = std::array<std::shared_ptr<const std::vector<uint8_t>>, 4>;
+using Published = std::array<std::shared_ptr<const Upload>, 4>;
+
+// One level of the atlas's size.
+std::shared_ptr<const Upload> Atlas(std::vector<uint8_t> pixels) {
+    auto upload = std::make_shared<Upload>();
+    upload->data = std::move(pixels);
+    upload->levels.push_back({0, AtlasSize, AtlasSize});
+    return upload;
+}
 
 // The textures of each role with the icons for the state.
 Published Draw(const Gow3GlyphState& s, const Originals& base) {
@@ -721,27 +732,549 @@ Published Draw(const Gow3GlyphState& s, const Originals& base) {
     }
     Published out{};
     if (!base[RoleRgba].empty()) {
-        out[RoleRgba] = std::make_shared<const std::vector<uint8_t>>(atlas);
+        out[RoleRgba] = Atlas(atlas);
     }
     if (!base[RoleColor].empty()) { // its alpha channel stays as the game made it
-        auto color = std::make_shared<std::vector<uint8_t>>(base[RoleColor]);
-        for (size_t i = 0; i < AtlasBytes; i += 4) std::memcpy(&(*color)[i], &atlas[i], 3);
-        out[RoleColor] = std::move(color);
-        auto alpha = std::make_shared<std::vector<uint8_t>>(base[RoleAlpha]);
-        for (size_t i = 0; i < AtlasBytes; i += 4) std::memset(&(*alpha)[i], atlas[i + 3], 3);
-        out[RoleAlpha] = std::move(alpha);
+        std::vector<uint8_t> color = base[RoleColor];
+        for (size_t i = 0; i < AtlasBytes; i += 4) std::memcpy(&color[i], &atlas[i], 3);
+        out[RoleColor] = Atlas(std::move(color));
+        std::vector<uint8_t> alpha = base[RoleAlpha];
+        for (size_t i = 0; i < AtlasBytes; i += 4) std::memset(&alpha[i], atlas[i + 3], 3);
+        out[RoleAlpha] = Atlas(std::move(alpha));
     }
     return out;
 }
 
+// --- HUD button pictures -------------------------------------------------------------------
+
+// The prompts' pictures in the HUD paks, the same art in the three games (measured on it): a
+// face button is a dark disc on a background of its colour, which a soft round mask (a texture
+// of its own, kept as the game made it) turns into the glow around the button; the pressed ones
+// show the button in perspective; the shoulder buttons are plates with their names; the d-pad
+// has its up arm lit. Their replacements keep the game's picture and paint its symbol out, so
+// the masks still fit them.
+enum class Hud : uint8_t { Face, Press, Bumper, Trigger, Dpad, DpadLook };
+struct HudName {
+    const char* name; // in the pak
+    Hud kind;
+    int8_t button;    // GOW3_GLYPH_*
+    bool pressed;     // Press: pushed down
+};
+constexpr HudName hud_names[] = {
+    {"x-button-color", Hud::Face, GOW3_GLYPH_CROSS, false},
+    {"circle-button-color", Hud::Face, GOW3_GLYPH_CIRCLE, false},
+    {"square-button-color", Hud::Face, GOW3_GLYPH_SQUARE, false},
+    {"triangle-button-color", Hud::Face, GOW3_GLYPH_TRIANGLE, false},
+    {"circle-button-up", Hud::Press, GOW3_GLYPH_CIRCLE, false},
+    {"circle-button-down", Hud::Press, GOW3_GLYPH_CIRCLE, true},
+    {"square-button-up", Hud::Press, GOW3_GLYPH_SQUARE, false},
+    {"square-button-down", Hud::Press, GOW3_GLYPH_SQUARE, true},
+    {"triangle-button-up", Hud::Press, GOW3_GLYPH_TRIANGLE, false},
+    {"triangle-button-down", Hud::Press, GOW3_GLYPH_TRIANGLE, true},
+    {"l1-button", Hud::Bumper, GOW3_GLYPH_L1, false},
+    {"r1-button", Hud::Bumper, GOW3_GLYPH_R1, false},
+    {"l2-button", Hud::Trigger, GOW3_GLYPH_L2, false},
+    {"r2-button", Hud::Trigger, GOW3_GLYPH_R2, false},
+    {"up-button", Hud::Dpad, GOW3_GLYPH_UP, false},
+    {"bp-up-button", Hud::Dpad, GOW3_GLYPH_UP, false},
+    {"up-button-look-color", Hud::DpadLook, GOW3_GLYPH_UP, false},
+};
+
+const HudName* FindHud(const std::string& name) {
+    for (const HudName& h : hud_names) {
+        if (name == h.name) return &h;
+    }
+    return nullptr;
+}
+
+// Where a button's symbol is, in parts of the picture: a face button's disc (256x256: the
+// centre at 128.5, its black outline 70 texels from it) and the top of a button in perspective
+// (512x512: an ellipse of 98.5 by 41 texels, the centre at 237, or at 261 pushed down). The
+// games' symbols reach 0.9 of the way to the outline, and 0.96 of the way to the top's rim (a
+// pushed-down one's glow); the new one fills a cell 104 texels wide on a face button, 172 on a
+// top.
+constexpr float FaceCentre = 128.5f / 256.0f, FaceRadius = 70.0f / 256.0f, FaceCell = 104.0f / 256.0f;
+constexpr float PressRx = 98.5f / 512.0f, PressRy = 41.0f / 512.0f, PressCell = 172.0f / 512.0f;
+constexpr float PressTop = 237.0f / 512.0f, PressTopDown = 261.0f / 512.0f;
+constexpr float FaceReach = 0.9f;
+
+Canvas FromPixels(const std::vector<uint8_t>& rgba, int w, int h) {
+    Canvas c(w, h);
+    for (size_t i = 0; i < size_t(w) * h; ++i) {
+        for (int k = 0; k < 3; ++k) c.px[i * 4 + k] = rgba[i * 4 + k] / 255.0f;
+        c.px[i * 4 + 3] = 1.0f;
+    }
+    return c;
+}
+
+std::vector<uint8_t> ToPixels(const Canvas& c) {
+    std::vector<uint8_t> out(size_t(c.w) * c.h * 4);
+    for (size_t i = 0; i < size_t(c.w) * c.h; ++i) {
+        for (int k = 0; k < 3; ++k) out[i * 4 + k] = uint8_t(std::clamp(c.px[i * 4 + k], 0.0f, 1.0f) * 255.0f + 0.5f);
+        out[i * 4 + 3] = 255;
+    }
+    return out;
+}
+
+Rgb At(const Canvas& c, int x, int y) {
+    const float* p = &c.px[(size_t(y) * c.w + x) * 4];
+    return {p[0], p[1], p[2]};
+}
+
+float Luma(Rgb p) {
+    return p.r * 0.3f + p.g * 0.59f + p.b * 0.11f;
+}
+
+float Median(std::vector<float> values) {
+    std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
+    return values[values.size() / 2];
+}
+
+struct Area {
+    int x0 = 0, y0 = 0, x1 = -1, y1 = -1; // inclusive; empty while x1 < x0
+    bool Empty() const { return x1 < x0; }
+    void Add(int x, int y) {
+        if (Empty()) {
+            x0 = x1 = x, y0 = y1 = y;
+        } else {
+            x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+        }
+    }
+};
+
+// The texels of [x0, x1) x [y0, y1) unlike `colour` (the background): where the button is.
+Area Unlike(const Canvas& c, Rgb colour, int x0, int y0, int x1, int y1) {
+    Area area;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            const Rgb p = At(c, x, y);
+            if (std::fabs(p.r - colour.r) + std::fabs(p.g - colour.g) + std::fabs(p.b - colour.b) > 0.35f) {
+                area.Add(x, y);
+            }
+        }
+    }
+    return area;
+}
+
+// Grows the marked texels by `n` texels.
+void Grow(std::vector<uint8_t>& mark, int w, int h, int n) {
+    for (int g = 0; g < n; ++g) {
+        std::vector<uint8_t> next = mark;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = size_t(y) * w + x;
+                if (!mark[i] && ((x > 0 && mark[i - 1]) || (x + 1 < w && mark[i + 1]) ||
+                                 (y > 0 && mark[i - w]) || (y + 1 < h && mark[i + w]))) {
+                    next[i] = 1;
+                }
+            }
+        }
+        mark.swap(next);
+    }
+}
+
+// A button's symbol inside an ellipse: its coloured texels, and the dark band engraved along
+// them (darker than the rest of the button's top, a few texels from the colour); then the whole
+// 4x4 blocks they touch, whose BC1 colours the symbol shifted.
+std::vector<uint8_t> MarkSymbol(const Canvas& c, float cx, float cy, float rx, float ry) {
+    const int w = c.w, h = c.h;
+    std::vector<uint8_t> inside(size_t(w) * h), mark(size_t(w) * h);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float dx = (x + 0.5f - cx) / rx, dy = (y + 0.5f - cy) / ry;
+            if (dx * dx + dy * dy > 1.0f) continue;
+            const size_t i = size_t(y) * w + x;
+            inside[i] = 1;
+            const Rgb p = At(c, x, y);
+            const float hi = std::max({p.r, p.g, p.b}), lo = std::min({p.r, p.g, p.b});
+            if (hi > 0.2f && (hi - lo) / hi > 0.2f) mark[i] = 1;
+        }
+    }
+    std::vector<uint8_t> near = mark, core = mark;
+    Grow(near, w, h, 6);
+    Grow(core, w, h, 2);
+    std::vector<float> rest;
+    for (size_t i = 0; i < inside.size(); ++i) {
+        if (inside[i] && !core[i]) rest.push_back(Luma(At(c, int(i % w), int(i / w))));
+    }
+    if (rest.empty()) {
+        return mark;
+    }
+    const float typical = Median(std::move(rest));
+    for (size_t i = 0; i < inside.size(); ++i) {
+        if (inside[i] && near[i] && !mark[i] && Luma(At(c, int(i % w), int(i / w))) < typical - 0.05f) mark[i] = 1;
+    }
+    for (int by = 0; by < h; by += 4) {
+        for (int bx = 0; bx < w; bx += 4) {
+            bool touched = false;
+            for (int y = by; y < std::min(by + 4, h) && !touched; ++y) {
+                for (int x = bx; x < std::min(bx + 4, w); ++x) touched |= mark[size_t(y) * w + x] != 0;
+            }
+            if (!touched) continue;
+            for (int y = by; y < std::min(by + 4, h); ++y) {
+                for (int x = bx; x < std::min(bx + 4, w); ++x) mark[size_t(y) * w + x] |= inside[size_t(y) * w + x];
+            }
+        }
+    }
+    return mark;
+}
+
+// A shoulder button's name in [x0, x1) x [y0, y1): the texels far from the plate's typical
+// brightness (dark on Uncharted 1 and 2's grey plates, light on Uncharted 3's dark ones).
+// `ink` takes the colour of the clearest of them.
+std::vector<uint8_t> MarkName(const Canvas& c, int x0, int y0, int x1, int y1, Area& area, Rgb& ink) {
+    std::vector<uint8_t> mark(size_t(c.w) * c.h);
+    std::vector<float> values;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) values.push_back(Luma(At(c, x, y)));
+    }
+    if (values.empty()) {
+        return mark;
+    }
+    const float typical = Median(std::move(values));
+    float sum[3] = {}, count = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            const Rgb p = At(c, x, y);
+            const float away = std::fabs(Luma(p) - typical);
+            if (away <= 0.15f) continue;
+            mark[size_t(y) * c.w + x] = 1;
+            area.Add(x, y);
+            if (away > 0.25f) {
+                sum[0] += p.r, sum[1] += p.g, sum[2] += p.b;
+                ++count;
+            }
+        }
+    }
+    if (count) ink = {sum[0] / count, sum[1] / count, sum[2] / count};
+    return mark;
+}
+
+// Paints the marked texels, grown by `grow` texels (their soft edge), with the colours around
+// them, from the outside in.
+void Inpaint(Canvas& c, std::vector<uint8_t> mark, int grow) {
+    const int w = c.w, h = c.h;
+    Grow(mark, w, h, grow);
+    for (int pass = 0; pass < 256; ++pass) {
+        std::vector<uint8_t> next = mark;
+        bool left = false;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = size_t(y) * w + x;
+                if (!mark[i]) continue;
+                float sum[3] = {};
+                int n = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = x + dx, ny = y + dy;
+                        if ((!dx && !dy) || nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        const size_t j = size_t(ny) * w + nx;
+                        if (mark[j]) continue;
+                        for (int k = 0; k < 3; ++k) sum[k] += c.px[j * 4 + k];
+                        ++n;
+                    }
+                }
+                if (n) {
+                    for (int k = 0; k < 3; ++k) c.px[i * 4 + k] = sum[k] / n;
+                    next[i] = 0;
+                } else {
+                    left = true;
+                }
+            }
+        }
+        mark.swap(next);
+        if (!left) break;
+    }
+}
+
+// Paints the top of a button in perspective anew: its symbol, and a pushed-down one's glow, are
+// much of it. The colours of its plain texels near the rim, in its upper and its lower half, make
+// a gradient from the back to the front, blended into the game's rim towards its edge.
+void RepaintTop(Canvas& c, float cx, float cy, float rx, float ry) {
+    constexpr float sample = 0.8f, inner = 0.92f, outer = 0.97f;
+    std::vector<float> back[3], front[3];
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            const float dx = (x + 0.5f - cx) / rx, dy = (y + 0.5f - cy) / ry, e = std::sqrt(dx * dx + dy * dy);
+            if (e < sample || e > inner) continue;
+            const Rgb p = At(c, x, y);
+            const float hi = std::max({p.r, p.g, p.b}), lo = std::min({p.r, p.g, p.b});
+            if (hi > 0.0f && (hi - lo) / hi > 0.2f) continue; // the symbol's colour
+            auto& half = dy < 0.0f ? back : front;
+            half[0].push_back(p.r), half[1].push_back(p.g), half[2].push_back(p.b);
+        }
+    }
+    const auto typical = [](std::vector<float>(&channels)[3], Rgb fallback) {
+        return channels[0].empty() ? fallback
+                                   : Rgb{Median(channels[0]), Median(channels[1]), Median(channels[2])};
+    };
+    const Rgb far = typical(back, DarkBottom), near = typical(front, far);
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            const float dx = (x + 0.5f - cx) / rx, dy = (y + 0.5f - cy) / ry, e = std::sqrt(dx * dx + dy * dy);
+            if (e > outer) continue;
+            const float keep = std::clamp((e - inner) / (outer - inner), 0.0f, 1.0f);
+            const Rgb paint = Mix(far, near, std::clamp(dy * 0.5f + 0.5f, 0.0f, 1.0f));
+            float* p = &c.px[(size_t(y) * c.w + x) * 4];
+            p[0] = paint.r + (p[0] - paint.r) * keep;
+            p[1] = paint.g + (p[1] - paint.g) * keep;
+            p[2] = paint.b + (p[2] - paint.b) * keep;
+        }
+    }
+}
+
+// Gives the background colour `from`, and the part of it blended into the button's dark edge,
+// the colour `to` (a glow of the Xbox letter's colour). The button's top, the ellipse, keeps its
+// colours.
+void Recolour(Canvas& c, Rgb from, Rgb to, float cx, float cy, float rx, float ry) {
+    const float fm = (from.r + from.g + from.b) / 3.0f;
+    const float fc[3] = {from.r - fm, from.g - fm, from.b - fm};
+    const float fc_len = std::sqrt(fc[0] * fc[0] + fc[1] * fc[1] + fc[2] * fc[2]);
+    const float ff = from.r * from.r + from.g * from.g + from.b * from.b;
+    if (fc_len < 0.05f || ff < 1e-4f) return;
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            const float dx = (x + 0.5f - cx) / rx, dy = (y + 0.5f - cy) / ry;
+            if (dx * dx + dy * dy <= 1.0f) continue;
+            float* p = &c.px[(size_t(y) * c.w + x) * 4];
+            const float pm = (p[0] + p[1] + p[2]) / 3.0f;
+            const float pc[3] = {p[0] - pm, p[1] - pm, p[2] - pm};
+            const float pc_len = std::sqrt(pc[0] * pc[0] + pc[1] * pc[1] + pc[2] * pc[2]);
+            if (pc_len < 0.04f || (pc[0] * fc[0] + pc[1] * fc[1] + pc[2] * fc[2]) / (pc_len * fc_len) < 0.85f) {
+                continue; // grey (the button) or another hue
+            }
+            const float t = std::clamp((p[0] * from.r + p[1] * from.g + p[2] * from.b) / ff, 0.0f, 1.0f);
+            p[0] = std::clamp(p[0] + t * (to.r - from.r), 0.0f, 1.0f);
+            p[1] = std::clamp(p[1] + t * (to.g - from.g), 0.0f, 1.0f);
+            p[2] = std::clamp(p[2] + t * (to.b - from.b), 0.0f, 1.0f);
+        }
+    }
+}
+
+// Draws `src` over `dst` into the box (x0, y0, w, h), scaled to it (4x4 samples a texel).
+void Blit(Canvas& dst, const Canvas& src, float x0, float y0, float w, float h) {
+    constexpr int S = 4;
+    const float sx = src.w / w, sy = src.h / h;
+    for (int y = std::max(0, int(std::floor(y0))); y < std::min(dst.h, int(std::ceil(y0 + h))); ++y) {
+        for (int x = std::max(0, int(std::floor(x0))); x < std::min(dst.w, int(std::ceil(x0 + w))); ++x) {
+            float acc[4] = {};
+            for (int j = 0; j < S; ++j) {
+                for (int i = 0; i < S; ++i) {
+                    const int u = int(std::floor((x + (i + 0.5f) / S - x0) * sx));
+                    const int v = int(std::floor((y + (j + 0.5f) / S - y0) * sy));
+                    if (u < 0 || v < 0 || u >= src.w || v >= src.h) continue;
+                    for (int k = 0; k < 4; ++k) acc[k] += src.px[(size_t(v) * src.w + u) * 4 + k];
+                }
+            }
+            if (acc[3] <= 0.0f) continue;
+            float* p = &dst.px[(size_t(y) * dst.w + x) * 4];
+            const float keep = 1.0f - acc[3] / (S * S);
+            for (int k = 0; k < 4; ++k) p[k] = acc[k] / (S * S) + p[k] * keep;
+        }
+    }
+}
+
+// What a HUD picture shows for a PS4 button (GOW3_GLYPH_*) on the player's device.
+struct Content {
+    std::string key;  // a key's name on a keycap
+    int mouse = 0;    // a mouse source (Mouse)
+    char letter = 0;  // a gamepad's face button
+    std::string name; // a gamepad's shoulder button or trigger
+    Rgb colour = Ink; // of the letter or name
+};
+
+// False: nothing presses the button on that device, or the gamepad shows it as the game does.
+bool Choose(const Gow3GlyphState& s, int button, Content& out) {
+    if (s.style == GOW3_GLYPHS_PLAYSTATION) {
+        return false;
+    }
+    if (s.style == GOW3_GLYPHS_KEYBOARD) {
+        if (s.key[button] > 0) {
+            out.key = KeyLabel(s.key[button]);
+        } else if (s.mouse[button] > 0) {
+            out.mouse = s.mouse[button];
+        }
+        return !out.key.empty() || out.mouse;
+    }
+    const int pad = s.pad[button];
+    const bool nintendo = s.face[0] == 'B' && s.face[1] == 'A';
+    switch (pad) {
+    case SDL_GAMEPAD_BUTTON_SOUTH:
+    case SDL_GAMEPAD_BUTTON_EAST:
+    case SDL_GAMEPAD_BUTTON_WEST:
+    case SDL_GAMEPAD_BUTTON_NORTH:
+        out.letter = s.face[pad] ? s.face[pad] : "ABXY"[pad];
+        out.colour = s.style == GOW3_GLYPHS_XBOX ? LetterColor(out.letter) : Ink;
+        return true;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: out.name = nintendo ? "L" : "LB"; return true;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: out.name = nintendo ? "R" : "RB"; return true;
+    case GOW3_GLYPH_PAD_LEFT_TRIGGER: out.name = nintendo ? "ZL" : "LT"; return true;
+    case GOW3_GLYPH_PAD_RIGHT_TRIGGER: out.name = nintendo ? "ZR" : "RT"; return true;
+    default: return false; // sticks, d-pad, menu buttons: the game's picture
+    }
+}
+
+// The content filling a cell; a letter or name `cap` texels tall.
+void PaintContent(Canvas& cell, const Content& what, float cap) {
+    if (!what.key.empty()) {
+        KeyInCell(cell, what.key);
+    } else if (what.mouse) {
+        Mouse(cell, what.mouse);
+    } else {
+        Text(cell, what.letter ? std::string(1, what.letter) : what.name, cell.w * 0.5f, cell.h * 0.5f,
+             cap, cell.w * 0.86f, what.colour);
+    }
+}
+
+// A face button, flat or in perspective: the symbol on its top painted out, the content drawn
+// there (squeezed like the top in perspective); with an Xbox pad the glow takes the letter's
+// colour.
+bool DrawFace(Canvas& c, const HudName& hud, const Gow3GlyphState& s) {
+    Content what;
+    if (!Choose(s, hud.button, what)) return false;
+    const bool press = hud.kind == Hud::Press;
+    const float cx = FaceCentre * c.w;
+    const float cy = press ? (hud.pressed ? PressTopDown : PressTop) * c.h : FaceCentre * c.h;
+    const float rx = (press ? PressRx : FaceRadius) * c.w, ry = press ? PressRy * c.h : rx;
+    const Rgb glow = At(c, 1, 1);
+    if (press) {
+        RepaintTop(c, cx, cy, rx, ry);
+    } else {
+        Inpaint(c, MarkSymbol(c, cx, cy, rx * FaceReach, ry * FaceReach), 1);
+    }
+    if (what.letter && s.style == GOW3_GLYPHS_XBOX) Recolour(c, glow, what.colour, cx, cy, rx * 0.92f, ry * 0.92f);
+    const int side = std::max(8, int((press ? PressCell : FaceCell) * c.w));
+    Canvas cell(side, side);
+    PaintContent(cell, what, side * 0.42f);
+    const float squeeze = ry / rx;
+    Blit(c, cell, cx - side * 0.5f, cy - side * 0.5f * squeeze, float(side), side * squeeze);
+    return true;
+}
+
+// A shoulder button's plate: its name painted out, the key, mouse button or the pad's name of
+// the button in its place.
+bool DrawShoulder(Canvas& c, const HudName& hud, const Gow3GlyphState& s) {
+    Content what;
+    if (!Choose(s, hud.button, what)) return false;
+    const Rgb back = At(c, 1, 1);
+    const Area plate = Unlike(c, back, 0, 0, c.w, c.h);
+    if (plate.Empty()) return false;
+    const int pw = plate.x1 - plate.x0 + 1, ph = plate.y1 - plate.y0 + 1;
+    const int mx = int(pw * 0.16f), my = int(ph * 0.18f);
+    Area name;
+    Rgb ink = Byte(24, 22, 20);
+    Inpaint(c, MarkName(c, plate.x0 + mx, plate.y0 + my, plate.x1 + 1 - mx, plate.y1 + 1 - my, name, ink), 2);
+    const bool trigger = hud.kind == Hud::Trigger;
+    const float cx = name.Empty() ? (plate.x0 + plate.x1 + 1) * 0.5f : (name.x0 + name.x1 + 1) * 0.5f;
+    const float cy = name.Empty() ? plate.y0 + ph * (trigger ? 0.58f : 0.5f) : (name.y0 + name.y1 + 1) * 0.5f;
+    if (!what.key.empty() || what.mouse) {
+        const float cw = pw * (trigger ? 0.7f : 0.8f), ch = ph * (trigger ? 0.62f : 0.78f);
+        Canvas cell{int(cw), int(ch)};
+        PaintContent(cell, what, 0.0f);
+        Blit(c, cell, cx - cw * 0.5f, cy - ch * 0.5f, cw, ch);
+    } else { // the pad's name in the game's lettering, a little smaller on the narrow triggers
+        const float cap = (name.Empty() ? ph * 0.32f : float(name.y1 - name.y0 + 1)) * (trigger ? 0.8f : 0.9f);
+        Text(c, what.letter ? std::string(1, what.letter) : what.name, cx, cy, cap, pw * (trigger ? 0.58f : 0.72f),
+             what.letter ? what.colour : ink);
+    }
+    return true;
+}
+
+// The d-pad (in the look picture its lower square) with up lit: keycaps for the keys on its
+// arms, the lit one orange. A gamepad keeps the game's d-pad.
+bool DrawDpad(Canvas& c, const HudName& hud, const Gow3GlyphState& s) {
+    if (s.style != GOW3_GLYPHS_KEYBOARD) return false;
+    const int* keys = &s.key[GOW3_GLYPH_UP]; // up, down, left, right
+    if (!keys[0] && !keys[1] && !keys[2] && !keys[3]) return false;
+    const int top = hud.kind == Hud::DpadLook ? c.h - c.w : 0;
+    const Rgb back = At(c, 1, top + 1);
+    const Area pad = Unlike(c, back, 0, top, c.w, c.h);
+    if (pad.Empty()) return false;
+    const float cx = (pad.x0 + pad.x1 + 1) * 0.5f, cy = (pad.y0 + pad.y1 + 1) * 0.5f;
+    const float hx = (pad.x1 - pad.x0 + 1) * 0.5f, hy = (pad.y1 - pad.y0 + 1) * 0.5f;
+    const float key = std::min(hx, hy) * 0.25f, ax = hx * 0.62f, ay = hy * 0.62f;
+    const float centres[4][2] = {{cx, cy - ay}, {cx, cy + ay}, {cx - ax, cy}, {cx + ax, cy}};
+    for (int i = 0; i < 4; ++i) {
+        if (keys[i]) {
+            Keycap(c, centres[i][0], centres[i][1], key, key, KeyLabel(keys[i]), GOW3_GLYPH_UP + i == hud.button);
+        }
+    }
+    return true;
+}
+
+std::vector<uint8_t> DrawHud(const HudName& hud, int w, int h, const std::vector<uint8_t>& original,
+                             const Gow3GlyphState& s) {
+    if (s.style == GOW3_GLYPHS_PLAYSTATION || original.size() != size_t(w) * h * 4) {
+        return {};
+    }
+    Canvas c = FromPixels(original, w, h);
+    bool drawn = false;
+    switch (hud.kind) {
+    case Hud::Face:
+    case Hud::Press: drawn = DrawFace(c, hud, s); break;
+    case Hud::Bumper:
+    case Hud::Trigger: drawn = DrawShoulder(c, hud, s); break;
+    case Hud::Dpad:
+    case Hud::DpadLook: drawn = DrawDpad(c, hud, s); break;
+    }
+    return drawn ? ToPixels(c) : std::vector<uint8_t>{};
+}
+
+// Levels down to 1x1, each from 2x2 texels of the one before, as BC1; bottom row first.
+std::shared_ptr<const Upload> Encode(const std::vector<uint8_t>& shown, uint32_t width, uint32_t height) {
+    auto upload = std::make_shared<Upload>();
+    std::vector<uint8_t> level(shown.size());
+    const size_t row = size_t(width) * 4;
+    for (uint32_t y = 0; y < height; ++y) std::memcpy(&level[(height - 1 - y) * row], &shown[y * row], row);
+    uint32_t w = width, h = height;
+    for (;;) {
+        const std::vector<uint8_t> blocks = Gow3Bc::EncodeLinear(level.data(), w, h, Gow3Bc::Format::Bc1);
+        upload->levels.push_back({uint32_t(upload->data.size()), w, h});
+        upload->data.insert(upload->data.end(), blocks.begin(), blocks.end());
+        if (w == 1 && h == 1) {
+            return upload;
+        }
+        const uint32_t nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+        std::vector<uint8_t> next(size_t(nw) * nh * 4);
+        for (uint32_t y = 0; y < nh; ++y) {
+            for (uint32_t x = 0; x < nw; ++x) {
+                for (int k = 0; k < 4; ++k) {
+                    uint32_t sum = 0;
+                    for (uint32_t j = 0; j < 2; ++j) {
+                        for (uint32_t i = 0; i < 2; ++i) {
+                            sum += level[(size_t(std::min(y * 2 + j, h - 1)) * w + std::min(x * 2 + i, w - 1)) * 4 + k];
+                        }
+                    }
+                    next[(size_t(y) * nw + x) * 4 + k] = uint8_t((sum + 2) / 4);
+                }
+            }
+        }
+        level.swap(next);
+        w = nw, h = nh;
+    }
+}
+
 // --- Shared state and the worker -----------------------------------------------------------
 
+// A HUD button picture of the running game (role RoleHud + its index).
+struct HudPicture {
+    const HudName* what = nullptr;
+    Gow3Pak::Texture texture;
+    std::vector<uint8_t> original;           // RGBA8 of level 0 as shown, once the game uploaded it
+    std::shared_ptr<const Upload> published; // what to upload; null: the game's own picture
+    uint32_t drawn = 0;                      // the icons it was drawn for (icons_serial)
+};
+enum class Scan : uint8_t { NotStarted, Running, Done };
+
 std::mutex mutex;
-std::condition_variable wake;
+std::condition_variable wake, scanned;
 Originals originals;  // linear RGBA of each role found so far
 Published published;  // what to upload, per role
+std::vector<HudPicture> hud;
+Scan hud_scan = Scan::NotStarted;
 Gow3GlyphState wanted{};
-bool have_wanted = false, pending = false, worker_started = false;
+uint32_t icons_serial = 1; // changes with the icons to show
+bool have_wanted = false, pending = false, worker_started = false, font_dirty = false;
 std::atomic<uint32_t> generation{1};
 std::atomic<int64_t> layout_seen_ms{INT64_MIN / 2};
 
@@ -762,32 +1295,71 @@ const char* StyleName(int style) {
 
 void Work() {
     int reports = 0;
+    struct Job {
+        size_t index;
+        const HudName* what;
+        uint32_t width, height;
+        std::vector<uint8_t> original;
+    };
     for (;;) {
         Gow3GlyphState state;
         Originals base;
+        bool font;
+        uint32_t serial;
+        std::vector<Job> jobs;
         {
             std::unique_lock lock{mutex};
             wake.wait(lock, [] { return pending; });
             pending = false;
             state = wanted;
-            base = originals;
+            serial = icons_serial;
+            font = font_dirty;
+            font_dirty = false;
+            if (font) {
+                base = originals;
+            }
+            for (size_t i = 0; i < hud.size(); ++i) {
+                const HudPicture& p = hud[i];
+                if (!p.original.empty() && p.drawn != serial) {
+                    jobs.push_back({i, p.what, p.texture.width, p.texture.height, p.original});
+                }
+            }
         }
-        const bool pair_ready = base[RoleColor].empty() == base[RoleAlpha].empty();
-        const bool any = !base[RoleRgba].empty() || !base[RoleColor].empty();
         Published made{};
-        if (state.style != GOW3_GLYPHS_PLAYSTATION && any && pair_ready) {
-            made = Draw(state, base);
-        } else if (!pair_ready) {
-            continue; // Uncharted 3's colour or alpha texture is still to come
+        bool publish_font = false;
+        if (font) {
+            const bool pair_ready = base[RoleColor].empty() == base[RoleAlpha].empty();
+            const bool any = !base[RoleRgba].empty() || !base[RoleColor].empty();
+            publish_font = pair_ready; // else Uncharted 3's colour or alpha texture is still to come
+            if (state.style != GOW3_GLYPHS_PLAYSTATION && any && pair_ready) {
+                made = Draw(state, base);
+            }
+        }
+        std::vector<std::shared_ptr<const Upload>> pictures(jobs.size());
+        for (size_t j = 0; j < jobs.size(); ++j) {
+            const std::vector<uint8_t> shown =
+                DrawHud(*jobs[j].what, int(jobs[j].width), int(jobs[j].height), jobs[j].original, state);
+            if (!shown.empty()) {
+                pictures[j] = Encode(shown, jobs[j].width, jobs[j].height);
+            }
         }
         bool changed = false;
         {
             std::scoped_lock lock{mutex};
             if (pending) {
+                font_dirty |= font;
                 continue; // newer input arrived meanwhile: draw that instead
             }
-            for (size_t i = 0; i < made.size(); ++i) changed |= made[i] || published[i];
-            published = made;
+            if (publish_font) {
+                for (size_t i = 0; i < made.size(); ++i) changed |= made[i] || published[i];
+                published = made;
+            }
+            for (size_t j = 0; j < jobs.size(); ++j) {
+                HudPicture& p = hud[jobs[j].index];
+                changed |= pictures[j] || p.published;
+                p.published = pictures[j];
+                p.drawn = serial;
+            }
         }
         if (changed) {
             generation.fetch_add(1, std::memory_order_release);
@@ -812,15 +1384,131 @@ void Schedule() {
     wake.notify_one();
 }
 
-} // namespace
-
-bool Candidate(uint32_t width, uint32_t height, bool rgba8, uint32_t levels, bool thin_1d) {
-    return rgba8 && thin_1d &&
-           ((width == AtlasSize && height == AtlasSize && levels == 1) ||
-            (width == LayoutWidth && height == LayoutHeight && levels == LayoutLevels));
+// The running game's HUD pak (GOW3_REPORT_EXE names its executable): the guest path of its
+// folder, and the pak on the host. The paks sit in build/main/pakNN/ps4, NN differing per game.
+bool HudPak(std::string& guest, std::string& host) {
+    struct Game {
+        const char* executable;
+        const char* folder;
+        const char* pak;
+    };
+    static const Game games[] = {
+        {"eboot.bin", "/app0/u1data/build/main", "particle.pak"},
+        {"big2-ps4_Shipping.elf", "/app0/u2data/build/main", "hud.pak"},
+        {"big3-ps4_Shipping.elf", "/app0/u3data/build/main", "hud.pak"},
+    };
+    const char* running = std::getenv("GOW3_REPORT_EXE");
+    for (const Game& game : games) {
+        char folder[1024];
+        if (!running || std::strcmp(running, game.executable) ||
+            runtime_file_host_path(game.folder, folder, sizeof(folder)) != 0) {
+            continue;
+        }
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(folder, error)) {
+            const std::string name = entry.path().filename().string();
+            const std::filesystem::path pak = entry.path() / "ps4" / game.pak;
+            if (name.rfind("pak", 0) == 0 && entry.is_directory(error) && std::filesystem::exists(pak, error)) {
+                guest = std::string(game.folder) + "/" + name + "/ps4/" + game.pak;
+                host = pak.string();
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-Role Identify(const uint8_t* guest, uint32_t size) {
+// Finds the running game's HUD button pictures (on a thread of its own: the pak's records are
+// read from disk).
+void ScanHud() {
+    std::vector<HudPicture> found;
+    std::string guest, host, error;
+    if (HudPak(guest, host)) {
+        for (Gow3Pak::Texture& texture : Gow3Pak::ReadButtons(host, &error)) {
+            const HudName* what = FindHud(texture.name);
+            if (!what || (texture.dxgi != 71 && texture.dxgi != 72) || found.size() >= 255 - RoleHud ||
+                std::any_of(found.begin(), found.end(), [&](const HudPicture& p) { return p.texture.hash == texture.hash; })) {
+                continue; // masks and other pictures stay the game's; the same picture twice is one
+            }
+            HudPicture picture;
+            picture.what = what;
+            picture.texture = std::move(texture);
+            found.push_back(std::move(picture));
+        }
+        if (found.empty()) {
+            std::printf("Glyphs: no HUD button pictures in %s (%s)\n", guest.c_str(), error.c_str());
+        } else {
+            std::printf("Glyphs: %zu HUD button pictures in %s\n", found.size(), guest.c_str());
+        }
+        std::fflush(stdout);
+    }
+    std::scoped_lock lock{mutex};
+    hud = std::move(found);
+    hud_scan = Scan::Done;
+    scanned.notify_all();
+}
+
+// Called with the mutex held.
+void StartScan() {
+    if (hud_scan == Scan::NotStarted) {
+        hud_scan = Scan::Running;
+        std::thread(ScanHud).detach();
+    }
+}
+
+Role IdentifyHud(const uint8_t* guest, uint32_t size, uint32_t width, uint32_t height) {
+    const uint32_t bytes = Gow3Pak::Level0Bytes(width, height);
+    if (size < bytes) {
+        return RoleNone;
+    }
+    {
+        std::unique_lock lock{mutex};
+        StartScan();
+        if (!scanned.wait_for(lock, std::chrono::seconds(3), [] { return hud_scan == Scan::Done; }) || hud.empty()) {
+            return RoleNone;
+        }
+    }
+    const uint64_t hash = XXH3_64bits(guest, bytes);
+    std::scoped_lock lock{mutex};
+    for (size_t i = 0; i < hud.size(); ++i) {
+        HudPicture& p = hud[i];
+        if (p.texture.hash != hash || p.texture.width != width || p.texture.height != height) {
+            continue;
+        }
+        if (p.original.empty()) {
+            // The games keep their pictures bottom row first.
+            const std::vector<uint8_t> stored = Gow3Bc::DecodeThin1d(guest, width, height, Gow3Bc::Format::Bc1);
+            const size_t row = size_t(width) * 4;
+            p.original.resize(stored.size());
+            for (uint32_t y = 0; y < height; ++y) std::memcpy(&p.original[y * row], &stored[(height - 1 - y) * row], row);
+            std::printf("Glyphs: the HUD's %s picture found\n", p.texture.name.c_str());
+            std::fflush(stdout);
+            Schedule();
+        }
+        return Role(RoleHud + i);
+    }
+    return RoleNone;
+}
+
+} // namespace
+
+bool Candidate(uint32_t width, uint32_t height, Format format, uint32_t levels, bool thin_1d) {
+    if (!thin_1d || !levels) {
+        return false;
+    }
+    if (format == Format::Rgba8) {
+        return (width == AtlasSize && height == AtlasSize && levels == 1) ||
+               (width == LayoutWidth && height == LayoutHeight && levels == LayoutLevels);
+    }
+    // The HUD button pictures: 128, 256 or 512 texels square, or 256x512.
+    return format == Format::Bc1 &&
+           ((width == height && (width == 128 || width == 256 || width == 512)) || (width == 256 && height == 512));
+}
+
+Role Identify(const uint8_t* guest, uint32_t size, uint32_t width, uint32_t height, Format format) {
+    if (format == Format::Bc1) {
+        return IdentifyHud(guest, size, width, height);
+    }
     if (size < AtlasBytes) {
         return RoleNone;
     }
@@ -848,6 +1536,7 @@ Role Identify(const uint8_t* guest, uint32_t size) {
                 std::printf("Glyphs: %s's button icon font found\n", k.game);
                 std::fflush(stdout);
             }
+            font_dirty = true;
             Schedule();
         }
         return k.role;
@@ -859,8 +1548,12 @@ uint32_t Generation() {
     return generation.load(std::memory_order_acquire);
 }
 
-std::shared_ptr<const std::vector<uint8_t>> Pixels(Role role) {
+std::shared_ptr<const Upload> Pixels(Role role) {
     std::scoped_lock lock{mutex};
+    if (role >= RoleHud) {
+        const size_t index = role - RoleHud;
+        return index < hud.size() ? hud[index].published : nullptr;
+    }
     return role < published.size() ? published[role] : nullptr;
 }
 
@@ -877,11 +1570,26 @@ Gow3GlyphState State() {
     return wanted;
 }
 
+bool HudPictureKnown(const std::string& name) {
+    return FindHud(name) != nullptr;
+}
+
+std::vector<uint8_t> DrawHudPicture(const std::string& name, uint32_t width, uint32_t height,
+                                    const std::vector<uint8_t>& original, const Gow3GlyphState& state) {
+    const HudName* what = FindHud(name);
+    return what ? DrawHud(*what, int(width), int(height), original, state) : std::vector<uint8_t>{};
+}
+
+std::shared_ptr<const Upload> EncodeHudPicture(const std::vector<uint8_t>& shown, uint32_t width, uint32_t height) {
+    return Encode(shown, width, height);
+}
+
 } // namespace Gow3Glyphs
 
 extern "C" void gow3gpu_glyphs_set(const Gow3GlyphState* state) {
     using namespace Gow3Glyphs;
     std::scoped_lock lock{mutex};
+    StartScan(); // the running game's HUD pictures, while it loads
     if (have_wanted && !std::memcmp(&wanted, state, sizeof(wanted))) {
         return;
     }
@@ -891,8 +1599,13 @@ extern "C" void gow3gpu_glyphs_set(const Gow3GlyphState* state) {
     const bool redraw = !have_wanted || std::memcmp(&icons, &before, sizeof(icons)) != 0;
     wanted = *state;
     have_wanted = true;
-    if (redraw &&
-        (!originals[RoleRgba].empty() || !originals[RoleColor].empty() || !originals[RoleAlpha].empty())) {
+    if (!redraw) {
+        return;
+    }
+    ++icons_serial;
+    const bool font = !originals[RoleRgba].empty() || !originals[RoleColor].empty() || !originals[RoleAlpha].empty();
+    font_dirty |= font;
+    if (font || std::any_of(hud.begin(), hud.end(), [](const HudPicture& p) { return !p.original.empty(); })) {
         Schedule();
     }
 }

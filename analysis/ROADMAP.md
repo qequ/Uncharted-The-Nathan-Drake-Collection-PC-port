@@ -50,6 +50,20 @@ The port is GPL v2 or later. Its author asks that reuse credits the project and 
   its content when it uploads and uploads icons drawn for the keys and mouse buttons as bound, or
   for an Xbox (or Nintendo) pad. A PlayStation pad keeps the games' icons. The hashes are those of
   the 1.00 data.
+- **The HUD's prompts follow the player too** (17 Oct; `gow3_glyphs.cpp`, `gow3_pak.cpp`,
+  `gow3_bc.cpp`): the prompts in the world (pick up, climb, mash a button) are pictures of their
+  own, one per button, in each game's HUD pak (U1 `particle.pak`, U2 and U3 `hud.pak`), BC1 with
+  mip levels.
+  - **Finding them:** at start the runtime reads that pak's records for the pictures under
+    `hud/buttons/` and their hashes, so other versions of the data work too.
+  - **Drawing them:** the texture cache recognises them on upload and uploads the game's picture
+    with its symbol painted out and the key, mouse button or Xbox letter in its place, every
+    level. The glow takes the Xbox letter's colour.
+  - **Covered:** face buttons with their press animations, L1/R1/L2/R2, and d-pad up (with the
+    "look" picture).
+  - **Not yet:** the stick and touchpad prompts.
+  - **Tools:** `hud-icons-preview` (from a game folder) and `tools/hud_icons_sheet.py` show them
+    side by side; `hud-icons-test` checks the codec and the pak reader.
 - **The keyboard page** (`gow3_pc/gpu/shim/gow3_controls.cpp`, `gow3_ui.cpp`): the three games'
   Controller Layout screen draws the same DualShock 4 picture; while it is on screen and the
   player uses the keyboard, a page covers it with every action, its keys and mouse button, the
