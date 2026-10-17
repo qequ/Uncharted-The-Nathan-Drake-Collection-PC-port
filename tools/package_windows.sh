@@ -8,6 +8,8 @@
 # No game files ship: each player selects their own copy of the game in the launcher.
 # Run after building the runtime (gow3_pc/build.sh), from Git Bash or an MSYS2 CLANG64 shell.
 # PYTHON_HOME is a Windows Python 3.10+ with Pillow (default: the `python` on PATH).
+# PACKAGE_SYMBOLS=1 keeps the runtime's debug information (crash reports can then name the
+# runtime's functions); PACKAGE_ZIP=0 skips the zip. tools/install_local.sh sets both.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 # The Windows Python (looked up before the CLANG64 tools go first on PATH: MSYS2 has its own).
@@ -26,7 +28,11 @@ mkdir -p "$stage/gow3_pc/out" "$stage/gow3_pc/scripts" "$stage/tools" "$stage/la
     "$stage/analysis/uncharted-user"
 
 # The runtime without debug information, and every DLL it loads from the CLANG64 tree.
-llvm-strip --strip-debug -o "$stage/gow3_pc/out/gow3-probe.exe" gow3_pc/out/gow3-probe.exe
+if [[ ${PACKAGE_SYMBOLS:-0} == 1 ]]; then
+    cp gow3_pc/out/gow3-probe.exe "$stage/gow3_pc/out/gow3-probe.exe"
+else
+    llvm-strip --strip-debug -o "$stage/gow3_pc/out/gow3-probe.exe" gow3_pc/out/gow3-probe.exe
+fi
 ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while read -r dll; do
     cp "$dll" "$stage/gow3_pc/out/"
 done
@@ -97,8 +103,10 @@ if [[ -n $forbidden ]]; then
 fi
 
 rm -f dist/Uncharted-windows.zip
-(cd dist/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
+if [[ ${PACKAGE_ZIP:-1} != 0 ]]; then
+    (cd dist/stage && powershell -NoProfile -Command \
+        "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
+fi
 rm -rf dist/Uncharted-windows
 mv "$stage" dist/Uncharted-windows
-du -sh dist/Uncharted-windows dist/Uncharted-windows.zip
+du -sh dist/Uncharted-windows $([[ -f dist/Uncharted-windows.zip ]] && echo dist/Uncharted-windows.zip)

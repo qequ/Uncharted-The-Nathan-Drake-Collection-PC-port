@@ -3,9 +3,13 @@
 
 Pick a game, set display and performance options (presets for low-end and high-end PCs) and play.
 Runtime options are kept in analysis/uncharted-user/probe.ini, the same file the in-game menu
-(Insert / R3+L2) reads and writes; launcher-only options in %APPDATA%/Uncharted Launcher.
+(Insert / R3+L2) reads and writes; launcher-only options in analysis/uncharted-user/launcher.json
+(beside the saves, so a folder holds all of a player's setup; earlier versions kept them in
+%APPDATA%/Uncharted Launcher, which is read once).
 The game is started through tools/probe_uncharted.py (preparation, code patches, Collection game
 switches), with the options below passed as environment variables.
+`--play [u1|u2|u3]` starts a game with the saved settings without the window, the same way PLAY
+does (shortcuts and tests), waits for it and exits with its exit code.
 """
 import ctypes
 import json
@@ -40,7 +44,8 @@ USER_DIR = ROOT / "analysis" / "uncharted-user"
 REPORTS_DIR = ROOT / "analysis" / "reports"  # crash, freeze and F8 mark reports (tools/playtest_reports.py)
 INI_FILE = USER_DIR / "probe.ini"
 RUN_SCRIPT = ROOT / "tools" / "probe_uncharted.py"
-CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
+CONFIG_FILE = USER_DIR / "launcher.json"
+LEGACY_CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 APP_TITLE = "Uncharted: The Nathan Drake Collection"
 # The author's links in the launcher header: label, address, color, hover color.
@@ -382,10 +387,14 @@ def write_ini(game, updates):
 
 def read_config():
     config = dict(LAUNCHER_DEFAULTS)
-    try:
-        config.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        pass
+    # The folder's own file; the first time, the one earlier versions kept in %APPDATA% (the game
+    # folder and per-game options carry over).
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        try:
+            config.update(json.loads(path.read_text(encoding="utf-8")))
+            break
+        except (OSError, ValueError):
+            continue
     # Version 2: render resolutions above 1080p crash in gameplay; earlier presets chose them.
     if config.get("version", 1) < 2:
         config["resolution"] = "1920x1080"
@@ -443,6 +452,75 @@ def read_config():
 def write_config(config):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def config_game_dir(config):
+    folder = config.get("game_dir") or ""
+    return Path(folder) if folder else DEFAULT_GAME_DIR
+
+
+def game_launch(config, key):
+    """The start script's command line and environment for a game: PLAY and --play start the game
+    the same way. Settings come only from this folder (launcher.json, the game's settings file and
+    test-env.txt for tests): GOW3_* and UNCHARTED_* variables from outside are left out."""
+    game = next(g for g in GAMES if g["key"] == key)
+    env = {name: value for name, value in os.environ.items()
+           if not name.upper().startswith(("GOW3_", "UNCHARTED_"))}
+    env["UNCHARTED_DIAGNOSTICS"] = "1" if config.get("diagnostics", True) else "0"
+    env["UNCHARTED_TORCH_FORWARD"] = "1" if config.get("torch_forward", True) else "0"
+    # Every game's own options: the Collection menu starts the others itself, and
+    # tools/probe_uncharted.py applies the started game's (its settings file decides the
+    # vblank rate for frame rates above 60).
+    for other in GAME_KEYS:
+        settings = config["games"][other]
+        env[f"UNCHARTED_RESOLUTION_{other.upper()}"] = settings["resolution"]
+        env[f"UNCHARTED_MULTITHREADED_{other.upper()}"] = "1" if settings["multithreaded"] else "0"
+        # The keys, mouse look and button icons are in the game's settings file (Controls tab
+        # and the in-game page); only the mouse switch goes this way.
+        env[f"UNCHARTED_MOUSE_{other.upper()}"] = "1" if settings.get("mouse", True) else "0"
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
+        python = python.with_name("python.exe")
+    command = [str(python), "-u", str(RUN_SCRIPT), "--boot", "--seconds", "0", "--executable", game["exe"],
+               "--game", str(config_game_dir(config))]
+    return game, command, env
+
+
+def allow_game_foreground():
+    """The game window may take the foreground (Windows only lets the foreground process do that;
+    the game starts two processes down): fullscreen and keyboard input need the focus."""
+    try:
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+    except (AttributeError, OSError):
+        pass
+
+
+def play_headless(key=None):
+    """--play [u1|u2|u3]: the game (default: the one selected last) with the saved settings,
+    started as PLAY starts it but without the window. Waits for it; returns its exit code."""
+    config = read_config()
+    key = key or config.get("game")
+    if key not in GAME_KEYS:
+        ctypes.windll.user32.MessageBoxW(None, f"Unknown game '{key}': use u1, u2 or u3.", APP_TITLE, 0x10)
+        return 2
+    if not RUN_SCRIPT.exists() or not is_game_dir(config_game_dir(config)):
+        ctypes.windll.user32.MessageBoxW(None, "Open the launcher once and press PLAY: it asks for your game "
+                                               "folder (the one with eboot.bin and sce_sys).", APP_TITLE, 0x40)
+        return 2
+    config["game"] = key
+    # As PLAY: the settings file gets the options it lacks.
+    write_ini(key, {name: read_ini(key).get(name, value) for name, value in INI_DEFAULTS.items()})
+    write_config(config)
+    game, command, env = game_launch(config, key)
+    allow_game_foreground()
+    with open(USER_DIR / "launcher-last-run.log", "w", encoding="utf-8") as log:
+        log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(command)} (--play {key})\n")
+        log.flush()
+        process = subprocess.Popen(command, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        code = process.wait()
+        log.write(f"exit code {code}\n")
+    return code
 
 
 # ---------------------------------------------------------------------------------------------
@@ -740,8 +818,7 @@ class Launcher:
             self.ini_label.config(text=f"Settings: {ini_file(self.config['game'])}")
 
     def game_dir(self):
-        folder = self.config.get("game_dir") or ""
-        return Path(folder) if folder else DEFAULT_GAME_DIR
+        return config_game_dir(self.config)
 
     def choose_game_dir(self):
         from tkinter import filedialog
@@ -1416,32 +1493,8 @@ class Launcher:
         self.follow_ini()  # the in-game menu's last changes, not older values kept here
         self.save_ini({k: self.ini.get(k, v) for k, v in INI_DEFAULTS.items()})
         write_config(self.config)
-        game = self.current_game()
-        env = os.environ.copy()
-        env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
-        env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
-        # Every game's own options: the Collection menu starts the others itself, and
-        # tools/probe_uncharted.py applies the started game's (its settings file decides the
-        # vblank rate for frame rates above 60).
-        env.pop("GOW3_VBLANK_HZ", None)
-        for key in GAME_KEYS:
-            settings = self.config["games"][key]
-            env[f"UNCHARTED_RESOLUTION_{key.upper()}"] = settings["resolution"]
-            env[f"UNCHARTED_MULTITHREADED_{key.upper()}"] = "1" if settings["multithreaded"] else "0"
-            # The keys, mouse look and button icons are in the game's settings file (Controls tab
-            # and the in-game page); only the mouse switch goes this way.
-            env[f"UNCHARTED_MOUSE_{key.upper()}"] = "1" if settings.get("mouse", True) else "0"
-        python = Path(sys.executable)
-        if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
-            python = python.with_name("python.exe")
-        command = [str(python), "-u", str(RUN_SCRIPT), "--boot", "--seconds", "0", "--executable", game["exe"],
-                   "--game", str(self.game_dir())]
-        # The game window may take the foreground (Windows only lets the foreground process do
-        # that; the game starts two processes down): fullscreen and keyboard input need the focus.
-        try:
-            ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
-        except (AttributeError, OSError):
-            pass
+        game, command, env = game_launch(self.config, self.config["game"])
+        allow_game_foreground()
         try:
             self.process = subprocess.Popen(command, cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -1649,6 +1702,8 @@ class Launcher:
 
 
 def main():
+    if sys.argv[1:2] == ["--play"]:
+        sys.exit(play_headless(sys.argv[2] if len(sys.argv) > 2 else None))
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:

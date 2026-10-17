@@ -1,18 +1,37 @@
 # Play testing
 
-How to start the games from this source tree, play, and keep what is needed when something goes
-wrong. The game files: `F:\Uncharted - The Nathan Drake Collection (CUSA02343) [v01.00]` (the folder
-with `eboot.bin` and `sce_sys`).
+How to start the games, play, and keep what is needed when something goes wrong. The game files:
+`F:\Uncharted - The Nathan Drake Collection (CUSA02343) [v01.00]` (the folder with `eboot.bin`
+and `sce_sys`).
 
 ## Starting a game
 
-**With the launcher.** Double-click `Start-Uncharted.cmd` in the repository folder. The first PLAY
-asks for the game folder (above). Pick a game (1, 2, 3), a preset (Medium is 1080p at 60 FPS) and
-press **PLAY**. The first start of each game prepares its files and compiles shaders: expect a
-slow first load and some stutter. The Advanced tab has **Desktop shortcut**, **Open log folder** and
-**Crash reports**. A copy run from the source tree never updates itself: it changes with git.
+**One way for playing and for tests: the play folder `F:\Uncharted-PC`.** It is this repository
+built as the release package: `Uncharted Launcher.exe` with its own Python (nothing else needs to
+be installed), the runtime, and under `analysis` the player's saves, settings, shader cache, logs
+and reports. Start it with the desktop shortcut **Uncharted** (`Start-Uncharted.cmd` in the
+repository opens it too). Pick a game (1, 2, 3), a preset (Medium is 1080p at 60 FPS) and press
+**PLAY**. The first start of each game prepares its files and compiles shaders: expect a slow first
+load and some stutter. The launcher keeps its own options there as well
+(`analysis\uncharted-user\launcher.json`; the first start takes them over from
+`%APPDATA%\Uncharted Launcher`, where earlier versions kept them). The Advanced tab has
+**Open log folder** and **Crash reports**. Updates come from this fork's releases (none yet), never
+from upstream's, which would drop this fork's changes.
 
-**From a terminal**, without the launcher (Command Prompt or PowerShell):
+**Bringing it up to the repository's code**: build the runtime (`bash gow3_pc/build.sh`), close the
+game and the launcher, then run `bash tools/install_local.sh` in Git Bash. It packages this checkout
+and installs it the way a launcher update does: the program is replaced; saves, settings, shader
+cache, logs and reports stay. `F:\Uncharted-PC\BUILD.txt` names the commit installed.
+
+**Tests** run the same build from a copy beside it (`bash tools/install_local.sh
+F:/Uncharted-PC-test`), with the player's settings and saves copied in, and start it the same way:
+`"Uncharted Launcher.exe" --play u2` (`u1`, `u2`, `u3`) starts a game with the saved settings and no
+launcher window, as PLAY does, and returns when the game ends. A test started from the Claude app
+goes through a shortcut that Windows Explorer opens: the app's own processes see a private copy of
+AppData (it is an MSIX package), and the game must not.
+
+**From the repository, for development only** (its own `analysis` folder, separate saves): the
+launcher with `py launcher\uncharted_launcher.pyw`, or a game without it:
 
 ```
 cd /d D:\ps4_ports\Uncharted-The-Nathan-Drake-Collection-PC-port
@@ -21,8 +40,8 @@ py tools\probe_uncharted.py --boot --seconds 0 --game "F:\Uncharted - The Nathan
 
 `--executable eboot.bin` is Uncharted 1 (the default), `big2-ps4_Shipping.elf` Uncharted 2,
 `big3-ps4_Shipping.elf` Uncharted 3; `--collection-menu` starts the Collection's game menu instead.
-The settings are the launcher's (`analysis\uncharted-user\probe-u1.ini`, `-u2`, `-u3`). `--seconds 0`
-means no time limit.
+`--seconds 0` means no time limit. This skips the launcher's options (render resolution,
+multithreading): results can differ from the play folder's.
 
 Closing the game window ends the game; the launcher's STOP does the same.
 
@@ -65,7 +84,9 @@ does the same for a test.
 
 ## When something goes wrong
 
-Every report is a folder in `analysis\reports` named `<date> <time> <game> <kind>`:
+Every report is a folder in `analysis\reports` of the folder the game runs from
+(`F:\Uncharted-PC\analysis\reports`), named `<date> <time> <game> <kind>`. All paths below are in
+that folder.
 
 | Kind | When | What happens |
 |---|---|---|

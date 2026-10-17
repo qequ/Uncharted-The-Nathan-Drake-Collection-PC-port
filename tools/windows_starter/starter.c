@@ -1,12 +1,15 @@
 /* Uncharted Launcher.exe: starts the launcher (launcher\uncharted_launcher.pyw) with the Python that
- * ships next to it (python\pythonw.exe), without a console window. Built by tools/package_windows.sh. */
+ * ships next to it (python\pythonw.exe), without a console window. Built by tools/package_windows.sh.
+ * Arguments go to the launcher, and then this program waits for it and returns its exit code:
+ * "Uncharted Launcher.exe" --play u2 plays Uncharted 2 with the saved settings, without the
+ * launcher's window, and ends with the game (shortcuts, Steam, tests). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wchar.h>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int show)
 {
-    (void)instance, (void)previous, (void)arguments, (void)show;
+    (void)instance, (void)previous, (void)show;
     static wchar_t dir[32768], python[32768], line[32768];
     DWORD length = GetModuleFileNameW(NULL, dir, 32768);
     if (length == 0 || length >= 32768)
@@ -14,8 +17,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     wchar_t *slash = wcsrchr(dir, L'\\');
     if (slash)
         *slash = 0;
+    const int forward = arguments && *arguments;
     swprintf(python, 32768, L"%ls\\python\\pythonw.exe", dir);
-    swprintf(line, 32768, L"\"%ls\" \"%ls\\launcher\\uncharted_launcher.pyw\"", python, dir);
+    swprintf(line, 32768, L"\"%ls\" \"%ls\\launcher\\uncharted_launcher.pyw\"%ls%ls", python, dir,
+             forward ? L" " : L"", forward ? arguments : L"");
 
     STARTUPINFOW startup = {.cb = sizeof(startup)};
     PROCESS_INFORMATION process;
@@ -25,6 +30,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
         return 1;
     }
     CloseHandle(process.hThread);
+    DWORD code = 0;
+    if (forward) {
+        WaitForSingleObject(process.hProcess, INFINITE);
+        GetExitCodeProcess(process.hProcess, &code);
+    }
     CloseHandle(process.hProcess);
-    return 0;
+    return (int)code;
 }
