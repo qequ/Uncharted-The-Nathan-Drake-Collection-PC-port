@@ -346,12 +346,13 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
     return {};
 }
 
-// gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
-static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
-                    vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
-                    int index, u32 pixel_bytes = 4,
-                    vk::ImageAspectFlags aspect = vk::ImageAspectFlagBits::eColor,
-                    u32 block_width = 1, u32 block_height = 1, u32 layer = 0) {
+// gow3: raw copy of an image into `file` once the GPU is done (written as `file`.part and then
+// renamed, so a reader never sees half of it).
+static void CopyImageToFile(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                            vk::Image image, vk::ImageLayout layout, u32 w, u32 h, std::string file,
+                            u32 pixel_bytes = 4,
+                            vk::ImageAspectFlags aspect = vk::ImageAspectFlagBits::eColor,
+                            u32 block_width = 1, u32 block_height = 1, u32 layer = 0) {
     const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                        .size = VkDeviceSize((w + block_width - 1) / block_width) *
                                                ((h + block_height - 1) / block_height) * pixel_bytes,
@@ -369,19 +370,37 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
     cmdbuf.copyImageToBuffer(image, layout, buffer,
                              vk::BufferImageCopy{.imageSubresource = {aspect, 0, layer, 1},
                                                  .imageExtent = {w, h, 1}});
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
+                                      size = buffer_ci.size, file = std::move(file)] {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        const std::string partial = file + ".part";
+        if (FILE* f = std::fopen(partial.c_str(), "wb")) {
+            const bool written = std::fwrite(info.pMappedData, 1, size, f) == size;
+            std::fclose(f);
+            std::error_code error;
+            if (written) {
+                std::filesystem::rename(partial, file, error);
+            }
+            if (!written || error) {
+                std::remove(partial.c_str());
+            }
+        }
+        vmaDestroyBuffer(allocator, buffer, allocation);
+    });
+}
+
+// gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
+static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                    vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
+                    int index, u32 pixel_bytes = 4,
+                    vk::ImageAspectFlags aspect = vk::ImageAspectFlagBits::eColor,
+                    u32 block_width = 1, u32 block_height = 1, u32 layer = 0) {
     const char* dir = std::getenv("GOW3_DUMP_DIR");
     char path[512];
     std::snprintf(path, sizeof(path), "%s/%s_%03d_%ux%u.raw", dir && *dir ? dir : "out/dump", name,
                   index, w, h);
-    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
-                                      size = buffer_ci.size, file = std::string{path}] {
-        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
-        if (FILE* f = std::fopen(file.c_str(), "wb")) {
-            std::fwrite(info.pMappedData, 1, size, f);
-            std::fclose(f);
-        }
-        vmaDestroyBuffer(allocator, buffer, allocation);
-    });
+    CopyImageToFile(instance, scheduler, cmdbuf, image, layout, w, h, path, pixel_bytes, aspect,
+                    block_width, block_height, layer);
 }
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
@@ -392,6 +411,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     static const char* frame_dump_trigger = std::getenv("GOW3_FRAME_DUMP_TRIGGER");
     static int frame_dump_index = 0;
     const bool frame_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
+    // gow3 17 Oct: GOW3_SCREENSHOT_TRIGGER=<file>: when the file exists it is removed and this
+    // frame's presented image goes to GOW3_SCREENSHOT_DIR as screen_<w>x<h>_<rgba|bgra>.raw (raw
+    // 32-bit pixels): the play-test reports' screenshots (tools/playtest_reports.py), in every
+    // display mode and with no window capture. Unlike the frame dump above it adds no
+    // synchronization before the frame is drawn, so it shows what the player sees (the dump's
+    // barriers hid the FSR pass's missing one below).
+    static const char* screenshot_trigger = std::getenv("GOW3_SCREENSHOT_TRIGGER");
+    const bool screenshot = screenshot_trigger && std::remove(screenshot_trigger) == 0;
     // gow3: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
     const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
@@ -580,16 +607,30 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
-    if (frame_dump) {
+    if (frame_dump || screenshot) {
         // The presented image as the swapchain blit reads it (General after the pass).
         const vk::MemoryBarrier2 done{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                                       .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
                                       .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
                                       .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
-        DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
-                frame->width, frame->height, "output", frame_dump_index);
-        ++frame_dump_index;
+        if (frame_dump) {
+            DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
+                    frame->width, frame->height, "output", frame_dump_index);
+            ++frame_dump_index;
+        }
+        const char* screenshot_dir = std::getenv("GOW3_SCREENSHOT_DIR");
+        const vk::Format format = swapchain.GetSurfaceFormat().format;
+        const bool bgra = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
+        const bool rgba = format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eR8G8B8A8Srgb ||
+                          format == vk::Format::eA8B8G8R8UnormPack32 ||
+                          format == vk::Format::eA8B8G8R8SrgbPack32;
+        if (screenshot && screenshot_dir && *screenshot_dir && (bgra || rgba)) { // not 10-bit HDR
+            CopyImageToFile(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
+                            frame->width, frame->height,
+                            std::format("{}/screen_{}x{}_{}.raw", screenshot_dir, frame->width,
+                                        frame->height, bgra ? "bgra" : "rgba"));
+        }
     }
 
     // Flush frame creation commands.

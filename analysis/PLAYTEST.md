@@ -82,7 +82,7 @@ In each folder:
   that executable; runtime functions by name and line). For a freeze or mark: every thread's call
   stack and CPU use.
 - `screen.jpg`: the screen at the mark or freeze, or within 10 seconds before a crash
-  (`screen-10s-earlier.jpg` too). Not in exclusive fullscreen: use windowed or borderless.
+  (`screen-10s-earlier.jpg` too): the frame the game presented, in any display mode.
 - `log-tail.txt`: the end of the game's log. `settings.txt`: every setting of that run and the
   source commit. `minidump.dmp` (crash): for a debugger.
 

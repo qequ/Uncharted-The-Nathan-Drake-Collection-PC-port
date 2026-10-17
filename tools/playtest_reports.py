@@ -2,14 +2,13 @@
 
 The runtime writes a folder in analysis/reports for a crash, a freeze (no new frame for 20 s) or
 a moment the player marks with F8, and names it in the log ("Crash report: <folder>"). While the
-game runs, ScreenWatcher keeps a screenshot of its window from the last 10 seconds and takes one
-into each mark or freeze folder; after the game ends, finish() adds to every folder of that run
-the end of the log, the settings and the screenshot, names the runtime's functions in a crash's
-call stack (llvm-symbolizer), and writes a report for an exit the runtime could not report (a
-stop, a fast fail). Everything here is best effort: a report must never keep the game from
-starting or the start script from ending.
+game runs, ScreenWatcher keeps a screenshot from the last 10 seconds and puts one into each mark or
+freeze folder (the frame the runtime presents, written on request: see capture()). After the game
+ends, finish() adds to every folder of that run the end of the log, the settings and the
+screenshot, names the runtime's functions in a crash's call stack (llvm-symbolizer), and writes a
+report for an exit the runtime could not report (a stop, a fast fail). Everything here is best
+effort: a report must never keep the game from starting or the start script from ending.
 """
-import ctypes
 import os
 from pathlib import Path
 import re
@@ -47,62 +46,43 @@ def names(executable, guest_args):
 def environment(executable, guest_args, version):
     name, short = names(executable, guest_args)
     REPORTS.mkdir(parents=True, exist_ok=True)
+    frames = REPORTS / ".screens" / short / "frame"
+    frames.mkdir(parents=True, exist_ok=True)
     return {"GOW3_REPORT_DIR": str(REPORTS), "GOW3_REPORT_GAME": f"{name}, {version}" if version else name,
-            "GOW3_REPORT_SHORT": short, "GOW3_REPORT_EXE": executable}
+            "GOW3_REPORT_SHORT": short, "GOW3_REPORT_EXE": executable,
+            "GOW3_SCREENSHOT_TRIGGER": str(frames / "request"), "GOW3_SCREENSHOT_DIR": str(frames)}
 
 
-# --- screenshots of the game window ---------------------------------------------------------
+# --- screenshots ----------------------------------------------------------------------------
 
-def _window_of(pid):
-    """The largest visible top-level window of the process (its game window), or None."""
-    user32 = ctypes.windll.user32
-    found = []
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    def visit(hwnd, _):
-        owner = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(owner))
-        if owner.value == pid and user32.IsWindowVisible(ctypes.c_void_p(hwnd)):
-            rect = (ctypes.c_long * 4)()
-            user32.GetClientRect(ctypes.c_void_p(hwnd), rect)
-            found.append((rect[2] * rect[3], hwnd, rect[2], rect[3]))
-        return True
-
-    user32.EnumWindows(visit, None)
-    return max(found)[1:] if found else None
-
-
-def capture(pid, out, width=960):
-    """A JPEG of the game window's client area (PrintWindow, so other windows may cover it).
-    False when there is no window, it came back black (exclusive fullscreen), or Pillow is missing."""
+def capture(frames, out, width=960, wait=3.0):
+    """A JPEG of the next frame the game presents: the runtime writes it as raw pixels into
+    `frames` on request (GOW3_SCREENSHOT_TRIGGER, gpu/shadps4/.../vk_presenter.cpp). Unlike a
+    capture of the game window (PrintWindow, until 17 Oct) it works in exclusive fullscreen and
+    whatever covers the window, and holds exactly the presented frame. False when no frame came
+    (the game shows none: a freeze), it was black, or Pillow is missing."""
     try:
         from PIL import Image
     except ImportError:
         return False
-    window = _window_of(pid)
-    if not window or window[1] < 16 or window[2] < 16:
+    for old in frames.glob("screen_*"):
+        old.unlink(missing_ok=True)
+    (frames / "request").write_bytes(b"")
+    raw, deadline = None, time.monotonic() + wait
+    while raw is None and time.monotonic() < deadline:
+        raw = next(iter(frames.glob("screen_*.raw")), None)
+        if raw is None:
+            time.sleep(0.05)
+    if raw is None:
+        (frames / "request").unlink(missing_ok=True)  # no late answer to an old request
         return False
-    hwnd, w, h = window
-    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
-    for function in (user32.GetDC, gdi32.CreateCompatibleDC, gdi32.CreateCompatibleBitmap, gdi32.SelectObject):
-        function.restype = ctypes.c_void_p
-    hdc = user32.GetDC(ctypes.c_void_p(hwnd))
-    memory = gdi32.CreateCompatibleDC(ctypes.c_void_p(hdc))
-    bitmap = gdi32.CreateCompatibleBitmap(ctypes.c_void_p(hdc), w, h)
-    try:
-        gdi32.SelectObject(ctypes.c_void_p(memory), ctypes.c_void_p(bitmap))
-        if not user32.PrintWindow(ctypes.c_void_p(hwnd), ctypes.c_void_p(memory), 3):  # client only, full content
-            return False
-        header = struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
-        info = ctypes.create_string_buffer(header, 44)
-        pixels = ctypes.create_string_buffer(w * h * 4)
-        if not gdi32.GetDIBits(ctypes.c_void_p(memory), ctypes.c_void_p(bitmap), 0, h, pixels, info, 0):
-            return False
-    finally:
-        gdi32.DeleteObject(ctypes.c_void_p(bitmap))
-        gdi32.DeleteDC(ctypes.c_void_p(memory))
-        user32.ReleaseDC(ctypes.c_void_p(hwnd), ctypes.c_void_p(hdc))
-    image = Image.frombuffer("RGB", (w, h), pixels, "raw", "BGRX", 0, 1)
+    match = re.fullmatch(r"screen_(\d+)x(\d+)_(rgba|bgra)\.raw", raw.name)
+    data = raw.read_bytes()
+    raw.unlink(missing_ok=True)
+    if not match or len(data) < int(match.group(1)) * int(match.group(2)) * 4:
+        return False
+    w, h = int(match.group(1)), int(match.group(2))
+    image = Image.frombuffer("RGB", (w, h), data, "raw", "RGBX" if match.group(3) == "rgba" else "BGRX", 0, 1)
     if image.getextrema() == ((0, 0), (0, 0), (0, 0)):
         return False
     if image.width > width:
@@ -116,12 +96,14 @@ def capture(pid, out, width=960):
 
 class ScreenWatcher(threading.Thread):
     """While the game runs: a screenshot every `period` seconds (the last two are kept, for a
-    crash), and one into each mark or freeze report as soon as the log names it."""
+    crash), and one into each mark or freeze report as soon as the log names it (for a freeze the
+    last one: a frozen game presents no new frame)."""
 
     def __init__(self, pid, log, short, period=10.0):
         super().__init__(daemon=True)
         self.pid, self.log, self.period = pid, log, period
         self.shots = REPORTS / ".screens" / short
+        self.frames = self.shots / "frame"
         self.done = threading.Event()
         self.position, self.partial = 0, b""
 
@@ -146,22 +128,20 @@ class ScreenWatcher(threading.Thread):
         return found
 
     def run(self):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            return
         for old in self.last():
             old.unlink(missing_ok=True)
         next_shot = time.monotonic() + 15  # the window opens after the game files are read
         while not self.done.wait(1.0):
             try:
                 for kind, folder in self.new_announcements():
-                    if kind in ("Mark", "Freeze"):
-                        capture(self.pid, folder / "screen.jpg")
+                    if kind == "Mark":
+                        capture(self.frames, folder / "screen.jpg")
+                    elif kind == "Freeze" and self.last():
+                        shutil.copy2(self.last()[0], folder / "screen.jpg")
                 if time.monotonic() >= next_shot:
                     next_shot = time.monotonic() + self.period
                     taken = self.shots / "taken.jpg"
-                    if capture(self.pid, taken):
+                    if capture(self.frames, taken):
                         if (self.shots / "last.jpg").exists():
                             os.replace(self.shots / "last.jpg", self.shots / "before.jpg")
                         os.replace(taken, self.shots / "last.jpg")
